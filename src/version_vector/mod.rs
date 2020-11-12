@@ -102,7 +102,49 @@ mod tests {
     }
 
     #[test]
-    fn sample_vector_time_comparisons() {
+    fn compatible_vector_comparison() {
+        let peer_a = VersionPeer::new("A");
+        let peer_b = VersionPeer::new("B");
+
+        // A -> 1, B -> 3
+        let mut first_vector = VersionVector::new();
+        first_vector[&peer_a] = 1;
+        first_vector[&peer_b] = 3;
+        // A -> 2, B -> 4
+        let mut second_vector = VersionVector::new();
+        second_vector[&peer_a] = 2;
+        second_vector[&peer_b] = 4;
+
+        assert_eq!(first_vector.partial_cmp(&second_vector), Some(Ordering::Less));
+        assert_eq!(second_vector.partial_cmp(&first_vector), Some(Ordering::Greater));
+        assert_eq!(first_vector < second_vector, true);
+    }
+
+    #[test]
+    fn incompatible_vector_comparison() {
+        let peer_a = VersionPeer::new("A");
+        let peer_b = VersionPeer::new("B");
+
+        // A -> 1, B -> 2
+        let mut first_vector = VersionVector::new();
+        first_vector[&peer_a] = 1;
+        first_vector[&peer_b] = 2;
+        // A -> 2, B -> 1
+        let mut second_vector = VersionVector::new();
+        second_vector[&peer_a] = 2;
+        second_vector[&peer_b] = 1;
+
+        assert_eq!(first_vector.partial_cmp(&second_vector), None);
+        assert_eq!(second_vector.partial_cmp(&first_vector), None);
+        assert_eq!(first_vector < second_vector, false);
+        assert_eq!(first_vector <= second_vector, false);
+        assert_eq!(first_vector == second_vector, false);
+        assert_eq!(second_vector <= first_vector, false);
+        assert_eq!(second_vector < first_vector, false);
+}
+
+    #[test]
+    fn more_vector_time_comparisons() {
         let peer_a = VersionPeer::new("A");
         let peer_b = VersionPeer::new("B");
         let peer_c = VersionPeer::new("C");
