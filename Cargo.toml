@@ -1,0 +1,6 @@
+[package]
+name = "data_squirrel"
+version = "0.1.0"
+authors = ["Fritz Florian <flo.fritz@t-online.de>"]
+
+[dependencies]
