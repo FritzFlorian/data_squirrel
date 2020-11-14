@@ -1,0 +1,97 @@
+use rusqlite;
+
+pub type DBVersion = u32;
+
+#[derive(Debug)]
+pub enum MigrationError {
+    ReadWriteDBVersion(rusqlite::Error),
+    UnknownDBVersion(DBVersion),
+    SQLError(rusqlite::Error),
+}
+impl From<rusqlite::Error> for MigrationError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::SQLError(error)
+    }
+}
+
+pub type MigrationResult<T> = Result<T, MigrationError>;
+
+const REQUIRED_DB_VERSION: DBVersion = 1;
+const PRAGMA_USER_VERSION: &str = "user_version";
+
+/// Upgrades the given database connection to the REQUIRED_DB_VERSION of the
+/// current application build.
+///
+/// As the application and therefore the database schema evolves, this routine is
+/// used to step-by-step keep database files up to date with the application.
+///
+/// MUST be run before any other action on the database to make sure it's compatible.
+pub fn upgrade_db(connection: &rusqlite::Connection) -> MigrationResult<DBVersion> {
+    loop {
+        let current_version = read_db_version(&connection)?;
+        if current_version < REQUIRED_DB_VERSION {
+            migrate_up_from(connection, current_version)?;
+        } else {
+            return Ok(current_version);
+        }
+    }
+}
+
+/// Migrates the given database connection from the DBVersion version to (version + 1).
+/// Expects the database to be in the given version and updates the user_version pragma
+/// to the new (version + 1) value if successful.
+///
+/// Does not wrap the operation in a transaction,
+/// the caller is supposed to if a rollback might be required.
+fn migrate_up_from(connection: &rusqlite::Connection, version: DBVersion) -> MigrationResult<()> {
+    match version {
+        // Just run the know migration steps as a regular functions.
+        0 => migrate_from_0_to_1(&connection)?,
+        // We do not know how to handle this migration.
+        _ => return Err(MigrationError::UnknownDBVersion(version)),
+    };
+
+    write_db_version(&connection, version + 1)?;
+    Ok(())
+}
+
+fn migrate_from_0_to_1(_connection: &rusqlite::Connection) -> MigrationResult<()> {
+    Ok(())
+}
+
+fn read_db_version(connection: &rusqlite::Connection) -> MigrationResult<DBVersion> {
+    let version = connection
+        .pragma_query_value(None, PRAGMA_USER_VERSION, |row| {
+            let version: DBVersion = row.get(0)?;
+            Ok(version)
+        })
+        .map_err(|db_error| MigrationError::ReadWriteDBVersion(db_error))?;
+
+    Ok(version)
+}
+
+fn write_db_version(connection: &rusqlite::Connection, version: DBVersion) -> MigrationResult<()> {
+    connection
+        .pragma_update(None, PRAGMA_USER_VERSION, &version)
+        .map_err(|db_error| MigrationError::ReadWriteDBVersion(db_error))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_connection() -> rusqlite::Connection {
+        rusqlite::Connection::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn read_and_write_db_version() {
+        let connection = open_connection();
+
+        assert_eq!(read_db_version(&connection).unwrap(), 0);
+        write_db_version(&connection, 42).unwrap();
+        assert_eq!(read_db_version(&connection).unwrap(), 42);
+    }
+}

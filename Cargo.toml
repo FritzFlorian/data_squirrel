@@ -3,4 +3,6 @@ name = "data_squirrel"
 version = "0.1.0"
 authors = ["Fritz Florian <flo.fritz@t-online.de>"]
 
-[dependencies]
+[dependencies.rusqlite]
+version = "0.24.1"
+features = ["bundled"]
