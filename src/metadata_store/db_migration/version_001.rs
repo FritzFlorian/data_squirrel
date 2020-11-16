@@ -18,7 +18,7 @@ fn create_table_data_set(connection: &rusqlite::Connection) -> rusqlite::Result<
     connection.execute(
         "CREATE TABLE data_set (
                 id              INTEGER PRIMARY KEY,
-                unique_name     TEXT NOT NULL,
+                unique_name     TEXT NOT NULL UNIQUE,
                 human_name      TEXT NOT NULL 
              )",
         rusqlite::params![],

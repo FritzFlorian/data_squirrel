@@ -2,27 +2,21 @@
 /// Used on an existing DB connection to upgrade it to the most recent version.
 ///
 /// upgrade_db(&connection); // upgrades to latest DB version
-///
 mod version_001;
 
 use rusqlite;
-
-pub type DBVersion = u32;
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug)]
 pub enum MigrationError {
-    ReadWriteDBVersion(rusqlite::Error),
-    UnknownDBVersion(DBVersion),
-    SQLError(rusqlite::Error),
+    ReadWriteDBVersion { source: rusqlite::Error },
+    UnknownDBVersion { version: DBVersion },
+    SQLError { source: rusqlite::Error },
 }
-impl From<rusqlite::Error> for MigrationError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::SQLError(error)
-    }
-}
-
 pub type MigrationResult<T> = Result<T, MigrationError>;
 
+pub type DBVersion = u32;
 const REQUIRED_DB_VERSION: DBVersion = 1;
 const PRAGMA_USER_VERSION: &str = "user_version";
 
@@ -55,7 +49,7 @@ fn migrate_up_from(connection: &rusqlite::Connection, version: DBVersion) -> Mig
         // Just run the know migration steps as a regular functions.
         0 => version_001::migrate(&connection)?,
         // We do not know how to handle this migration.
-        _ => return Err(MigrationError::UnknownDBVersion(version)),
+        _ => return Err(MigrationError::UnknownDBVersion { version }),
     };
 
     write_db_version(&connection, version + 1)?;
@@ -68,7 +62,7 @@ fn read_db_version(connection: &rusqlite::Connection) -> MigrationResult<DBVersi
             let version: DBVersion = row.get(0)?;
             Ok(version)
         })
-        .map_err(|db_error| MigrationError::ReadWriteDBVersion(db_error))?;
+        .map_err(|source| MigrationError::ReadWriteDBVersion { source })?;
 
     Ok(version)
 }
@@ -76,9 +70,30 @@ fn read_db_version(connection: &rusqlite::Connection) -> MigrationResult<DBVersi
 fn write_db_version(connection: &rusqlite::Connection, version: DBVersion) -> MigrationResult<()> {
     connection
         .pragma_update(None, PRAGMA_USER_VERSION, &version)
-        .map_err(|db_error| MigrationError::ReadWriteDBVersion(db_error))?;
+        .map_err(|source| MigrationError::ReadWriteDBVersion { source })?;
 
     Ok(())
+}
+
+// Error Boilerplate (Error display, conversion and source)
+impl fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Error During Database Migration ({:?})", self)
+    }
+}
+impl From<rusqlite::Error> for MigrationError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::SQLError { source: error }
+    }
+}
+impl Error for MigrationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ReadWriteDBVersion { ref source } => Some(source),
+            Self::UnknownDBVersion { .. } => None,
+            Self::SQLError { ref source } => Some(source),
+        }
+    }
 }
 
 #[cfg(test)]
