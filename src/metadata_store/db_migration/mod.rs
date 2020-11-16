@@ -1,3 +1,10 @@
+/// Module performing database migrations to newer application/database format versions.
+/// Used on an existing DB connection to upgrade it to the most recent version.
+///
+/// upgrade_db(&connection); // upgrades to latest DB version
+///
+mod version_001;
+
 use rusqlite;
 
 pub type DBVersion = u32;
@@ -46,16 +53,12 @@ pub fn upgrade_db(connection: &rusqlite::Connection) -> MigrationResult<DBVersio
 fn migrate_up_from(connection: &rusqlite::Connection, version: DBVersion) -> MigrationResult<()> {
     match version {
         // Just run the know migration steps as a regular functions.
-        0 => migrate_from_0_to_1(&connection)?,
+        0 => version_001::migrate(&connection)?,
         // We do not know how to handle this migration.
         _ => return Err(MigrationError::UnknownDBVersion(version)),
     };
 
     write_db_version(&connection, version + 1)?;
-    Ok(())
-}
-
-fn migrate_from_0_to_1(_connection: &rusqlite::Connection) -> MigrationResult<()> {
     Ok(())
 }
 
@@ -86,6 +89,16 @@ mod tests {
         rusqlite::Connection::open_in_memory().unwrap()
     }
 
+    fn query_table_names(connection: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+        let mut query = connection.prepare("SELECT name FROM sqlite_schema")?;
+        let rows = query.query_map(rusqlite::params![], |row| {
+            let name: String = row.get(0)?;
+            Ok(name)
+        })?;
+
+        rows.collect()
+    }
+
     #[test]
     fn read_and_write_db_version() {
         let connection = open_connection();
@@ -93,5 +106,32 @@ mod tests {
         assert_eq!(read_db_version(&connection).unwrap(), 0);
         write_db_version(&connection, 42).unwrap();
         assert_eq!(read_db_version(&connection).unwrap(), 42);
+    }
+
+    #[test]
+    fn properly_upgrade_to_version_1() {
+        let connection = open_connection();
+
+        assert_eq!(read_db_version(&connection).unwrap(), 0);
+
+        migrate_up_from(&connection, 0).unwrap();
+
+        let table_names = query_table_names(&connection).unwrap();
+        assert!(table_names.contains(&"data_set".to_string()));
+        assert!(table_names.contains(&"data_store".to_string()));
+        assert!(table_names.contains(&"data_item".to_string()));
+        assert!(table_names.contains(&"owner_information".to_string()));
+        assert!(table_names.contains(&"mod_time".to_string()));
+        assert!(table_names.contains(&"sync_time".to_string()));
+
+        assert_eq!(read_db_version(&connection).unwrap(), 1);
+    }
+
+    #[test]
+    fn properly_upgrade_to_required_version() {
+        let connection = open_connection();
+
+        upgrade_db(&connection).unwrap();
+        assert_eq!(read_db_version(&connection).unwrap(), REQUIRED_DB_VERSION);
     }
 }
