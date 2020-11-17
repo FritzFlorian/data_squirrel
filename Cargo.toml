@@ -6,3 +6,6 @@ authors = ["Fritz Florian <flo.fritz@t-online.de>"]
 [dependencies.rusqlite]
 version = "0.24.1"
 features = ["bundled"]
+
+[dependencies.tempfile]
+version = "3"
