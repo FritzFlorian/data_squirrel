@@ -23,14 +23,14 @@ impl From<rusqlite::Error> for MetadataError {
         Self::GenericSQLError(error)
     }
 }
-pub type MetadataResult<T> = Result<T, MetadataError>;
+pub type Result<T> = std::result::Result<T, MetadataError>;
 
 pub struct MetadataStore {
     connection: rusqlite::Connection,
 }
 
 impl MetadataStore {
-    pub fn open(path: &str) -> MetadataResult<MetadataStore> {
+    pub fn open(path: &str) -> Result<MetadataStore> {
         let result = MetadataStore {
             connection: rusqlite::Connection::open(path)?,
         };
@@ -41,7 +41,7 @@ impl MetadataStore {
         Ok(result)
     }
 
-    pub fn create_data_set(&mut self, unique_name: &str) -> MetadataResult<DataSet> {
+    pub fn create_data_set(&mut self, unique_name: &str) -> Result<DataSet> {
         let transaction = self.connection.transaction()?;
 
         // Make sure we only hold ONE data_set instance in our database for now.
@@ -59,7 +59,7 @@ impl MetadataStore {
         Ok(data_set)
     }
 
-    pub fn get_data_set(&self) -> MetadataResult<DataSet> {
+    pub fn get_data_set(&self) -> Result<DataSet> {
         if let Some(result) = DataSet::get(&self.connection)? {
             Ok(result)
         } else {
@@ -67,13 +67,13 @@ impl MetadataStore {
         }
     }
 
-    pub fn update_data_set(&self, data_set: &DataSet) -> MetadataResult<()> {
+    pub fn update_data_set(&self, data_set: &DataSet) -> Result<()> {
         data_set.update(&self.connection)?;
 
         Ok(())
     }
 
-    fn upgrade_db(&self) -> db_migration::MigrationResult<()> {
+    fn upgrade_db(&self) -> db_migration::Result<()> {
         db_migration::upgrade_db(&self.connection)?;
 
         Ok(())

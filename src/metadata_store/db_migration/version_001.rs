@@ -1,6 +1,6 @@
-use super::MigrationResult;
+use super::Result;
 
-pub fn migrate(connection: &rusqlite::Connection) -> MigrationResult<()> {
+pub fn migrate(connection: &rusqlite::Connection) -> Result<()> {
     create_table_data_set(&connection)?;
     create_table_data_store(&connection)?;
     create_table_data_item(&connection)?;
