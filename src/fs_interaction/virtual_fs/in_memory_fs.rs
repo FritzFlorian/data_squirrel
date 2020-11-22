@@ -4,6 +4,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
+// Dummy implementation of the FS trait purely in memory used only for testing purposes.
+//
+// In short, the in memory FS is simply a hash map of paths to InMemoryItems with a thin
+// API that inserts/deletes them as required. Additionally, we add an layer to simulate
+// 'issues', e.g. fail to read a file because of permission or disk issues.
 pub struct InMemoryFS {
     // We do not want a FS to be mutable to the outside (a data_store has many references on
     // it and should be immutable to the outside, as all its actions/changes manifest in side
@@ -83,12 +88,17 @@ impl FS for InMemoryFS {
             if self.items.borrow().deref().contains_key(&path) {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
+
+            let time_now = FileTime::now();
             self.items.borrow_mut().deref_mut().insert(
                 path.clone(),
                 InMemoryItem {
                     metadata: Metadata {
                         read_only: false,
                         file_type: FileType::Dir,
+                        last_acc_time: time_now.clone(),
+                        last_mod_time: time_now.clone(),
+                        creation_time: time_now.clone(),
                     },
                     path: path,
                 },
@@ -133,12 +143,17 @@ impl FS for InMemoryFS {
             if self.items.borrow().deref().contains_key(&path) {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
+
+            let time_now = FileTime::now();
             self.items.borrow_mut().deref_mut().insert(
                 path.clone(),
                 InMemoryItem {
                     metadata: Metadata {
                         read_only: false,
                         file_type: FileType::File,
+                        last_acc_time: time_now.clone(),
+                        last_mod_time: time_now.clone(),
+                        creation_time: time_now.clone(),
                     },
                     path: path,
                 },
@@ -169,10 +184,14 @@ struct InMemoryItem {
 }
 impl InMemoryItem {
     fn new(item_path: PathBuf, file_type: FileType) -> InMemoryItem {
+        let time_now = FileTime::now();
         Self {
             metadata: Metadata {
                 read_only: false,
                 file_type: file_type,
+                last_acc_time: time_now.clone(),
+                last_mod_time: time_now.clone(),
+                creation_time: time_now.clone(),
             },
             path: item_path,
         }

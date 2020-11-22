@@ -9,3 +9,6 @@ features = ["bundled"]
 
 [dependencies.tempfile]
 version = "3"
+
+[dependencies.filetime]
+version = "0.2"

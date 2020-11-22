@@ -1,6 +1,6 @@
 mod virtual_fs;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -89,7 +89,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Self::open_with_fs(&data_store_root, virtual_fs)
     }
 
-    pub fn index(&self, relative_path: &Path) -> Result<Vec<DataItem<FS>>> {
+    pub fn index(&self, relative_path: &Path) -> Result<Vec<DataItem>> {
         // Normalize between './relative/path' and 'relative/path' notation
         let relative_path = relative_path.strip_prefix("./").unwrap_or(relative_path);
 
@@ -100,41 +100,35 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         // Collect all entries and simply push up any IO errors we could encounter.
+        let mut entries: Vec<DataItem> = Vec::new();
+        let mut dir_entries = self.fs.list_dir(&indexed_dir)?;
+
+        // We want to detect duplicates during this pass. To do so, we sort the vector and
+        // keep the last file name around.
         let mut last_filename_lowercase = String::new();
         let mut duplicate_count = 0;
-
-        let mut entries: Vec<DataItem<FS>> = Vec::new();
-        let mut dir_entries = self.fs.list_dir(&indexed_dir)?;
         dir_entries.sort_by(|a, b| a.path.partial_cmp(&b.path).unwrap());
         for dir_entry in dir_entries {
-            // Filter metadata/reserved entries
-            if dir_entry
-                .path
-                .file_name()
-                .unwrap()
-                .eq(&OsString::from(METADATA_DIR))
-            {
+            // Skip reserved entries, we simply do not list them.
+            let file_name = dir_entry.path.file_name().unwrap();
+            if self.is_reserved_name(file_name) {
                 continue;
             }
 
-            // Create basic data_item
+            // Create basic data_item for remaining, valid entries.
             let mut data_item = DataItem {
-                data_store: &self,
                 relative_path: relative_path.join(dir_entry.path.file_name().unwrap()),
                 metadata: None,
                 issues: Vec::new(),
             };
 
             // Check if item is a duplicate (when ignoring case in names).
-            let cur_filename_lowercase = dir_entry
-                .path
-                .file_name()
-                .unwrap()
+            // TODO: This comparison can be made more performant if we do not copy it to a string.
+            let filename_lowercase = file_name
                 .to_str()
                 .expect("TODO: we currently only support UTF-8 compatible file names!")
                 .to_lowercase();
-            // TODO: This comparison can be made more performant if we do not copy it to a string.
-            if cur_filename_lowercase == last_filename_lowercase {
+            if filename_lowercase == last_filename_lowercase {
                 duplicate_count += 1;
                 data_item.issues.push(Issue::Duplicate);
                 if duplicate_count < 2 {
@@ -143,31 +137,43 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             } else {
                 duplicate_count = 0;
             }
-            last_filename_lowercase = cur_filename_lowercase;
+            last_filename_lowercase = filename_lowercase;
 
-            // Try to load metadata for the item.
-            let metadata = self.fs.metadata(dir_entry.path);
-            if let Ok(metadata) = metadata {
-                // Catch issues with metadata that we do not want to sync.
-                // Examples are e.g. issues in not owning a file or similar.
-
-                // TODO: Figure out proper issues with permissions.
-                // if metadata.file_type().is_symlink() {
-                //     data_item.issues.push(Issue::SoftLinksForbidden);
-                // }
-                if metadata.read_only() {
-                    data_item.issues.push(Issue::ReadOnly);
-                }
-
-                data_item.metadata = Some(metadata);
-            } else {
-                data_item.issues.push(Issue::CanNotReadMetadata);
-            }
+            // Try to load metadata for the item and detect possible issues.
+            self.load_metadata(&mut data_item, &dir_entry);
 
             entries.push(data_item);
         }
 
         Ok(entries)
+    }
+
+    fn load_metadata(&self, data_item: &mut DataItem, dir_entry: &virtual_fs::DirEntry) {
+        // Loading metadata from the os can fail, however, we do not see this as failing
+        // to provide the data_item. We simply mark any conflicts we encounter.
+        let metadata = self.fs.metadata(&dir_entry.path);
+
+        if let Ok(metadata) = metadata {
+            // Catch issues with metadata that we do not want to sync.
+            // Examples are e.g. issues in not owning a file or similar.
+            // TODO: For now we have a rather 'simple' list of stuff we simply flag as an issue.
+            if metadata.file_type() == virtual_fs::FileType::Link {
+                data_item.issues.push(Issue::SoftLinksForbidden);
+            }
+            if metadata.read_only() {
+                data_item.issues.push(Issue::ReadOnly);
+            }
+
+            data_item.metadata = Some(metadata);
+        } else {
+            data_item.issues.push(Issue::CanNotReadMetadata);
+        }
+    }
+
+    fn is_reserved_name(&self, file_name: &OsStr) -> bool {
+        // Currently we only skip the metadata dir, however,
+        // we might want to add special marker files later on.
+        file_name.eq(&OsString::from(METADATA_DIR))
     }
 
     // Creates the lock dot-file.
@@ -220,13 +226,11 @@ impl<FS: virtual_fs::FS> Drop for DataStore<FS> {
 }
 
 #[derive(Debug)]
-pub struct DataItem<'a, FS: virtual_fs::FS> {
-    data_store: &'a DataStore<FS>,
+pub struct DataItem {
     relative_path: PathBuf,
     metadata: Option<virtual_fs::Metadata>,
     issues: Vec<Issue>,
 }
-pub type DefaultDataItem<'a> = DataItem<'a, virtual_fs::WrapperFS>;
 
 #[derive(PartialEq, Debug)]
 pub enum Issue {
@@ -238,8 +242,6 @@ pub enum Issue {
 
 #[cfg(test)]
 mod tests {
-    extern crate tempfile;
-
     use self::virtual_fs::{InMemoryFS, FS};
     use super::*;
     use std::fs;
@@ -295,7 +297,7 @@ mod tests {
         };
     }
 
-    fn has_data_item<FS: virtual_fs::FS>(items: &Vec<DataItem<FS>>, name: &str) -> bool {
+    fn has_data_item(items: &Vec<DataItem>, name: &str) -> bool {
         items
             .iter()
             .any(|item| item.relative_path == PathBuf::from(name))

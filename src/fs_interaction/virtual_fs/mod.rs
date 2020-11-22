@@ -1,3 +1,4 @@
+use filetime::FileTime;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -35,19 +36,30 @@ pub struct DirEntry {
 /// information when actually syncing between computers (e.g. also store it in the database).
 #[derive(Debug, Clone)]
 pub struct Metadata {
-    read_only: bool,
     file_type: FileType,
+    read_only: bool,
+    last_acc_time: FileTime,
+    last_mod_time: FileTime,
+    creation_time: FileTime,
 }
 impl Metadata {
-    pub fn read_only(&self) -> bool {
-        self.read_only
-    }
-
     pub fn file_type(&self) -> FileType {
         self.file_type
     }
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+    pub fn last_acc_time(&self) -> FileTime {
+        self.last_acc_time
+    }
+    pub fn last_mod_time(&self) -> FileTime {
+        self.last_mod_time
+    }
+    pub fn creation_time(&self) -> FileTime {
+        self.creation_time
+    }
 }
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum FileType {
     File,
     Dir,

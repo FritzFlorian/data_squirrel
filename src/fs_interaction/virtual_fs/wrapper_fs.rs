@@ -21,6 +21,11 @@ impl FS for WrapperFS {
                 t if t.is_symlink() => FileType::Link,
                 _ => return Err(io::Error::from(io::ErrorKind::Other)),
             },
+            last_acc_time: FileTime::from_last_access_time(&native_metadata),
+            last_mod_time: FileTime::from_last_modification_time(&native_metadata),
+            creation_time: FileTime::from_creation_time(&native_metadata)
+                .or_else(|| Some(FileTime::zero()))
+                .unwrap(),
         })
     }
 
