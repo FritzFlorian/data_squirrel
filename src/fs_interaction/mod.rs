@@ -1,7 +1,9 @@
 mod virtual_fs;
 
+use ring::digest::{Context, Digest, SHA256};
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // TODO: Get into more fine-grained error cause reporting as we go along
@@ -44,10 +46,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
     /// Same as open, but uses an explicit instance of the virtual FS abstraction.
     pub fn open_with_fs(data_store_root: &Path, virtual_fs: FS) -> Result<Self> {
-        let absolute_path = virtual_fs.canonicalize(data_store_root)?;
+        let data_store_root = virtual_fs.canonicalize(data_store_root)?;
         let mut result = DataStore {
             fs: virtual_fs,
-            root_path: absolute_path,
+            root_path: data_store_root,
             locked: false,
         };
         result.acquire_exclusive_lock()?;
@@ -74,6 +76,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
     // Same as create, but uses an explicit instance of the virtual FS abstraction.
     pub fn create_with_fs(data_store_root: &Path, virtual_fs: FS) -> Result<Self> {
+        let data_store_root = virtual_fs.canonicalize(data_store_root)?;
         // Create Metadata Directory (fail on io-errors or if it already exists).
         let metadata_path = data_store_root.join(METADATA_DIR);
         match virtual_fs.create_dir(&metadata_path) {
@@ -146,6 +149,24 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         Ok(entries)
+    }
+
+    pub fn calculate_hash(&self, relative_path: &Path) -> Result<Digest> {
+        let reader = self.fs.read_file(self.root_path.join(relative_path))?;
+        let mut buffered_reader = io::BufReader::new(reader);
+
+        let mut context = Context::new(&SHA256);
+        let mut buffer = [0; 1024];
+
+        loop {
+            let count = buffered_reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            context.update(&buffer[..count]);
+        }
+
+        Ok(context.finish())
     }
 
     fn load_metadata(&self, data_item: &mut DataItem, dir_entry: &virtual_fs::DirEntry) {
@@ -372,5 +393,37 @@ mod tests {
                 assert_eq!(item.issues, vec![Issue::Duplicate]);
             }
         });
+    }
+
+    #[test]
+    fn calculates_hash_correctly() {
+        const STRING_A: &str = "hello world!";
+        const HASH_A: [u8; 32] = [
+            117, 9, 229, 189, 160, 199, 98, 210, 186, 199, 249, 13, 117, 139, 91, 34, 99, 250, 1,
+            204, 188, 84, 42, 181, 227, 223, 22, 59, 224, 142, 108, 169,
+        ];
+        const STRING_B: &str = "whoo!";
+        const HASH_B: [u8; 32] = [
+            151, 254, 64, 101, 229, 147, 199, 192, 195, 195, 188, 8, 124, 186, 196, 35, 235, 157,
+            84, 215, 226, 136, 93, 24, 67, 133, 176, 243, 247, 96, 139, 176,
+        ];
+
+        let test_fs = InMemoryFS::default();
+        let file_a = PathBuf::from("/a.txt");
+        test_fs.create_file(&file_a).unwrap();
+        test_fs
+            .test_set_file_content(&file_a, STRING_A.to_string().into_bytes())
+            .unwrap();
+        let file_b = PathBuf::from("/b.txt");
+        test_fs.create_file(&file_b).unwrap();
+        test_fs
+            .test_set_file_content(&file_b, STRING_B.to_string().into_bytes())
+            .unwrap();
+
+        let data_store =
+            DataStore::<InMemoryFS>::create_with_fs(&PathBuf::from("/"), test_fs).unwrap();
+
+        assert_eq!(data_store.calculate_hash(&file_a).unwrap().as_ref(), HASH_A);
+        assert_eq!(data_store.calculate_hash(&file_b).unwrap().as_ref(), HASH_B);
     }
 }

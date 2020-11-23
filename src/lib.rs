@@ -1,4 +1,5 @@
 extern crate filetime;
+extern crate ring;
 extern crate rusqlite;
 extern crate tempfile;
 

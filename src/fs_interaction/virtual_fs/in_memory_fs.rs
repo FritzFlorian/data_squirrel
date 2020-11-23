@@ -29,6 +29,31 @@ impl InMemoryFS {
         }
     }
 
+    // pub fn debug_get_file_content<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<u8>> {
+    //     let path = self.canonicalize(path)?;
+    //
+    //     if let Some(item) = self.items.borrow().get(&path) {
+    //         Ok(item.data.clone())
+    //     } else {
+    //         Err(io::Error::from(io::ErrorKind::NotFound))
+    //     }
+    // }
+    #[cfg(test)]
+    pub fn test_set_file_content<P: AsRef<Path>>(
+        &self,
+        path: P,
+        content: Vec<u8>,
+    ) -> io::Result<()> {
+        let path = self.canonicalize(path)?;
+
+        if let Some(item) = self.items.borrow_mut().get_mut(&path) {
+            item.data = content;
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+
     fn is_root<P: AsRef<Path>>(&self, path: P) -> bool {
         path.as_ref().as_os_str() == "/"
     }
@@ -89,20 +114,10 @@ impl FS for InMemoryFS {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
 
-            let time_now = FileTime::now();
-            self.items.borrow_mut().deref_mut().insert(
-                path.clone(),
-                InMemoryItem {
-                    metadata: Metadata {
-                        read_only: false,
-                        file_type: FileType::Dir,
-                        last_acc_time: time_now.clone(),
-                        last_mod_time: time_now.clone(),
-                        creation_time: time_now.clone(),
-                    },
-                    path: path,
-                },
-            );
+            self.items
+                .borrow_mut()
+                .deref_mut()
+                .insert(path.clone(), InMemoryItem::new(path, FileType::Dir));
         } else {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
@@ -143,21 +158,10 @@ impl FS for InMemoryFS {
             if self.items.borrow().deref().contains_key(&path) {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
-
-            let time_now = FileTime::now();
-            self.items.borrow_mut().deref_mut().insert(
-                path.clone(),
-                InMemoryItem {
-                    metadata: Metadata {
-                        read_only: false,
-                        file_type: FileType::File,
-                        last_acc_time: time_now.clone(),
-                        last_mod_time: time_now.clone(),
-                        creation_time: time_now.clone(),
-                    },
-                    path: path,
-                },
-            );
+            self.items
+                .borrow_mut()
+                .deref_mut()
+                .insert(path.clone(), InMemoryItem::new(path, FileType::File));
         } else {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
@@ -175,12 +179,24 @@ impl FS for InMemoryFS {
 
         Ok(())
     }
+
+    fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>> {
+        let path = self.canonicalize(path)?;
+
+        if let Some(item) = self.items.borrow().get(&path) {
+            Ok(Box::new(std::io::Cursor::new(item.data.clone())))
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
 }
 
 #[derive(Debug)]
 struct InMemoryItem {
     metadata: Metadata,
     path: PathBuf,
+    // 'dirty' way to store mutable data in each memory item.
+    data: Vec<u8>,
 }
 impl InMemoryItem {
     fn new(item_path: PathBuf, file_type: FileType) -> InMemoryItem {
@@ -194,6 +210,7 @@ impl InMemoryItem {
                 creation_time: time_now.clone(),
             },
             path: item_path,
+            data: Vec::new(),
         }
     }
 }

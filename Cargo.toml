@@ -12,3 +12,6 @@ version = "3"
 
 [dependencies.filetime]
 version = "0.2"
+
+[dependencies.ring]
+version = "0.16"

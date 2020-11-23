@@ -21,6 +21,8 @@ pub trait FS {
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
+
+    fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>>;
 }
 
 /// Represents a single entry in a directory.

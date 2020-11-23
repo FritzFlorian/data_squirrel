@@ -51,4 +51,14 @@ impl FS for WrapperFS {
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         fs::remove_file(path)
     }
+
+    fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>> {
+        let reader = fs::OpenOptions::new()
+            .create(false)
+            .read(true)
+            .write(false)
+            .open(path.as_ref())?;
+
+        Ok(Box::new(reader))
+    }
 }
