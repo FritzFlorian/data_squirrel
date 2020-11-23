@@ -1,7 +1,9 @@
 mod virtual_fs;
 
 use ring::digest::{Context, Digest, SHA256};
+use std::error::Error;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -14,11 +16,6 @@ pub enum DataStoreError {
     SoftLinksForbidden,
     // IOError is simply our 'catch all' error type for 'non-special' issues
     IOError { source: io::Error },
-}
-impl From<io::Error> for DataStoreError {
-    fn from(error: io::Error) -> Self {
-        Self::IOError { source: error }
-    }
 }
 pub type Result<T> = std::result::Result<T, DataStoreError>;
 
@@ -259,6 +256,28 @@ pub enum Issue {
     CanNotReadMetadata,
     SoftLinksForbidden,
     ReadOnly,
+}
+
+// Error Boilerplate (Error display, conversion and source)
+impl From<io::Error> for DataStoreError {
+    fn from(error: io::Error) -> Self {
+        Self::IOError { source: error }
+    }
+}
+impl fmt::Display for DataStoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Error when accessing the FS ({:?})", self)
+    }
+}
+impl Error for DataStoreError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::IOError { ref source } => Some(source),
+            Self::AlreadyExists => None,
+            Self::SoftLinksForbidden => None,
+            Self::AlreadyOpened => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2,26 +2,23 @@ mod db_migration;
 // CRUD operations/basic entity mappings on database tables
 mod data_set;
 use self::data_set::DataSet;
+use std::error::Error;
+use std::fmt;
 
 use rusqlite;
 
 #[derive(Debug)]
 pub enum MetadataError {
-    DBMigrationError(db_migration::MigrationError),
-    GenericSQLError(rusqlite::Error),
+    DBMigrationError {
+        source: db_migration::MigrationError,
+    },
+    GenericSQLError {
+        source: rusqlite::Error,
+    },
     NotFound,
-    ViolatesDBConsistency { message: &'static str },
-}
-
-impl From<db_migration::MigrationError> for MetadataError {
-    fn from(error: db_migration::MigrationError) -> Self {
-        Self::DBMigrationError(error)
-    }
-}
-impl From<rusqlite::Error> for MetadataError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::GenericSQLError(error)
-    }
+    ViolatesDBConsistency {
+        message: &'static str,
+    },
 }
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
@@ -85,6 +82,33 @@ impl MetadataStore {
         self.connection.pragma_update(None, "foreign_keys", &1)?;
 
         Ok(())
+    }
+}
+
+// Error Boilerplate (Error display, conversion and source)
+impl fmt::Display for MetadataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Error During Metadata Interaction({:?})", self)
+    }
+}
+impl From<db_migration::MigrationError> for MetadataError {
+    fn from(error: db_migration::MigrationError) -> Self {
+        Self::DBMigrationError { source: error }
+    }
+}
+impl From<rusqlite::Error> for MetadataError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::GenericSQLError { source: error }
+    }
+}
+impl Error for MetadataError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::DBMigrationError { ref source } => Some(source),
+            Self::GenericSQLError { ref source } => Some(source),
+            Self::ViolatesDBConsistency { .. } => None,
+            Self::NotFound => None,
+        }
     }
 }
 
