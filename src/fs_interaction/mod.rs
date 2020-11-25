@@ -1,4 +1,4 @@
-mod virtual_fs;
+pub mod virtual_fs;
 
 use ring::digest::{Context, Digest, SHA256};
 use std::error::Error;
@@ -10,27 +10,28 @@ use std::path::{Path, PathBuf};
 
 // TODO: Get into more fine-grained error cause reporting as we go along
 #[derive(Debug)]
-pub enum DataStoreError {
+pub enum FSInteractionError {
     AlreadyExists,
     AlreadyOpened,
     SoftLinksForbidden,
     // IOError is simply our 'catch all' error type for 'non-special' issues
     IOError { source: io::Error },
 }
-pub type Result<T> = std::result::Result<T, DataStoreError>;
+pub type Result<T> = std::result::Result<T, FSInteractionError>;
 
 #[derive(Debug)]
-pub struct DataStore<FS: virtual_fs::FS> {
+pub struct FSInteraction<FS: virtual_fs::FS> {
     fs: FS,
     root_path: PathBuf,
     locked: bool,
 }
-pub type DefaultDataStore = DataStore<virtual_fs::WrapperFS>;
+pub type DefaultFSInteraction = FSInteraction<virtual_fs::WrapperFS>;
 
 const METADATA_DIR: &str = ".__data_squirrel__";
+const METADATA_DB_FILE: &str = "database.sqlite";
 const LOCK_FILE: &str = "lock";
 
-impl<FS: virtual_fs::FS> DataStore<FS> {
+impl<FS: virtual_fs::FS> FSInteraction<FS> {
     /// Opens a directory that contains a data_store and locks it by creating a dot-file.
     /// At most one process/instance of a physical data store shall be active at once.
     ///
@@ -44,7 +45,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     /// Same as open, but uses an explicit instance of the virtual FS abstraction.
     pub fn open_with_fs(data_store_root: &Path, virtual_fs: FS) -> Result<Self> {
         let data_store_root = virtual_fs.canonicalize(data_store_root)?;
-        let mut result = DataStore {
+        let mut result = FSInteraction {
             fs: virtual_fs,
             root_path: data_store_root,
             locked: false,
@@ -78,10 +79,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let metadata_path = data_store_root.join(METADATA_DIR);
         match virtual_fs.create_dir(&metadata_path) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(DataStoreError::AlreadyExists);
+                return Err(FSInteractionError::AlreadyExists);
             }
             Err(e) => {
-                return Err(DataStoreError::IOError { source: e });
+                return Err(FSInteractionError::IOError { source: e });
             }
             _ => (),
         };
@@ -96,7 +97,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // We do not follow soft-links in our sync procedure.
         let indexed_dir = self.root_path.join(&relative_path);
         if indexed_dir != self.fs.canonicalize(&indexed_dir)? {
-            return Err(DataStoreError::SoftLinksForbidden);
+            return Err(FSInteractionError::SoftLinksForbidden);
         }
 
         // Collect all entries and simply push up any IO errors we could encounter.
@@ -166,6 +167,16 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(context.finish())
     }
 
+    pub fn metadata_db_path(&self) -> PathBuf {
+        match self.fs.db_access_type() {
+            virtual_fs::DBAccessType::InPlace => {
+                self.root_path.join(METADATA_DIR).join(METADATA_DB_FILE)
+            }
+            virtual_fs::DBAccessType::InMemory => PathBuf::from(":memory:"),
+            virtual_fs::DBAccessType::TmpCopy => panic!("Not implemented!"),
+        }
+    }
+
     fn load_metadata(&self, data_item: &mut DataItem, dir_entry: &virtual_fs::DirEntry) {
         // Loading metadata from the os can fail, however, we do not see this as failing
         // to provide the data_item. We simply mark any conflicts we encounter.
@@ -202,10 +213,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
         match self.fs.create_file(&self.lock_path()) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(DataStoreError::AlreadyOpened);
+                return Err(FSInteractionError::AlreadyOpened);
             }
             Err(e) => {
-                return Err(DataStoreError::IOError { source: e });
+                return Err(FSInteractionError::IOError { source: e });
             }
             Ok(file) => file,
         };
@@ -236,7 +247,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     }
 }
 
-impl<FS: virtual_fs::FS> Drop for DataStore<FS> {
+impl<FS: virtual_fs::FS> Drop for FSInteraction<FS> {
     fn drop(&mut self) {
         // This is kind of a fatal fail...we can not release the lock?!
         self.release_exclusive_lock().unwrap();
@@ -245,9 +256,9 @@ impl<FS: virtual_fs::FS> Drop for DataStore<FS> {
 
 #[derive(Debug)]
 pub struct DataItem {
-    relative_path: PathBuf,
-    metadata: Option<virtual_fs::Metadata>,
-    issues: Vec<Issue>,
+    pub relative_path: PathBuf,
+    pub metadata: Option<virtual_fs::Metadata>,
+    pub issues: Vec<Issue>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -259,17 +270,17 @@ pub enum Issue {
 }
 
 // Error Boilerplate (Error display, conversion and source)
-impl From<io::Error> for DataStoreError {
+impl From<io::Error> for FSInteractionError {
     fn from(error: io::Error) -> Self {
         Self::IOError { source: error }
     }
 }
-impl fmt::Display for DataStoreError {
+impl fmt::Display for FSInteractionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Error when accessing the FS ({:?})", self)
     }
 }
-impl Error for DataStoreError {
+impl Error for FSInteractionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::IOError { ref source } => Some(source),
@@ -290,7 +301,7 @@ mod tests {
     fn create_data_store_in_empty_folder() {
         let test_dir = tempfile::tempdir().unwrap();
 
-        let data_store = DefaultDataStore::create(test_dir.path()).unwrap();
+        let data_store = DefaultFSInteraction::create(test_dir.path()).unwrap();
         assert_eq!(
             data_store.root_path,
             test_dir.path().canonicalize().unwrap()
@@ -306,7 +317,7 @@ mod tests {
     fn data_store_creates_and_releases_locks() {
         let test_dir = tempfile::tempdir().unwrap();
 
-        let data_store = DefaultDataStore::create(test_dir.path()).unwrap();
+        let data_store = DefaultFSInteraction::create(test_dir.path()).unwrap();
         assert!(
             test_dir.path().join(METADATA_DIR).join(LOCK_FILE).is_file(),
             "Must create lock file when having an open data_store."
@@ -324,15 +335,15 @@ mod tests {
         let test_dir = tempfile::tempdir().unwrap();
 
         // Create and close
-        let data_store_1 = DefaultDataStore::create(test_dir.path()).unwrap();
+        let data_store_1 = DefaultFSInteraction::create(test_dir.path()).unwrap();
         drop(data_store_1);
 
         // Open first instance
-        let _data_store_2 = DefaultDataStore::open(test_dir.path()).unwrap();
+        let _data_store_2 = DefaultFSInteraction::open(test_dir.path()).unwrap();
 
         // Opening second instance should fail
-        match DefaultDataStore::open(test_dir.path()) {
-            Err(DataStoreError::AlreadyOpened) => (),
+        match DefaultFSInteraction::open(test_dir.path()) {
+            Err(FSInteractionError::AlreadyOpened) => (),
             _ => panic!("Must report error that data_store is in use."),
         };
     }
@@ -346,7 +357,7 @@ mod tests {
     #[test]
     fn can_index_root_directory() {
         let test_dir = tempfile::tempdir().unwrap();
-        let data_store = DefaultDataStore::create(test_dir.path()).unwrap();
+        let data_store = DefaultFSInteraction::create(test_dir.path()).unwrap();
 
         // Create some test content
         fs::File::create(test_dir.path().join("a.txt")).unwrap();
@@ -368,7 +379,7 @@ mod tests {
     #[test]
     fn can_index_sub_directory() {
         let test_dir = tempfile::tempdir().unwrap();
-        let data_store = DefaultDataStore::create(test_dir.path()).unwrap();
+        let data_store = DefaultFSInteraction::create(test_dir.path()).unwrap();
 
         // Create some test content
         fs::create_dir(test_dir.path().join("sub")).unwrap();
@@ -394,7 +405,7 @@ mod tests {
         test_fs.create_file(&PathBuf::from("/file")).unwrap();
 
         let data_store =
-            DataStore::<InMemoryFS>::create_with_fs(&PathBuf::from("/"), test_fs).unwrap();
+            FSInteraction::<InMemoryFS>::create_with_fs(&PathBuf::from("/"), test_fs).unwrap();
 
         // Query for that test content
         let content = data_store.index(&PathBuf::from("")).unwrap();
@@ -440,7 +451,7 @@ mod tests {
             .unwrap();
 
         let data_store =
-            DataStore::<InMemoryFS>::create_with_fs(&PathBuf::from("/"), test_fs).unwrap();
+            FSInteraction::<InMemoryFS>::create_with_fs(&PathBuf::from("/"), test_fs).unwrap();
 
         assert_eq!(data_store.calculate_hash(&file_a).unwrap().as_ref(), HASH_A);
         assert_eq!(data_store.calculate_hash(&file_b).unwrap().as_ref(), HASH_B);

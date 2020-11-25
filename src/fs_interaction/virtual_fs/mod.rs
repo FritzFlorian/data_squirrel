@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 ///
 /// We only wrap/implement functions we actually require in our code. This can be less or sometimes
 /// more than the std::fs module provides (e.g. we would like to be able to set times on files).
-pub trait FS {
+pub trait FS: Clone {
     fn default() -> Self;
 
     fn canonicalize<P: AsRef<Path>>(&self, path: P) -> io::Result<PathBuf>;
@@ -23,6 +23,8 @@ pub trait FS {
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
 
     fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>>;
+
+    fn db_access_type(&self) -> DBAccessType;
 }
 
 /// Represents a single entry in a directory.
@@ -66,6 +68,19 @@ pub enum FileType {
     File,
     Dir,
     Link,
+}
+
+/// Depending on the file system there are different capabilities regarding running a databases
+/// stare directly on them (e.g. SQLite won't work properly on network drives and not at all on
+/// on AWS).
+/// We differ between direct/in-place access, temporary copy access (i.e. copy the DB file to a
+/// local directory, work with it, then update the remote copy) and in memory (for debugging only).
+///
+/// This way of handling the DB capabilities is not optimal and should be re-worked in the future.
+pub enum DBAccessType {
+    InPlace,
+    TmpCopy,
+    InMemory,
 }
 
 // Actual Implementations in Sub-Modules

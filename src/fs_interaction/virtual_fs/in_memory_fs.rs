@@ -3,6 +3,7 @@ use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 // Dummy implementation of the FS trait purely in memory used only for testing purposes.
 //
@@ -13,7 +14,7 @@ pub struct InMemoryFS {
     // We do not want a FS to be mutable to the outside (a data_store has many references on
     // it and should be immutable to the outside, as all its actions/changes manifest in side
     // effects on the disk, similar to e.g. a database connection being non mut).
-    items: RefCell<HashMap<PathBuf, InMemoryItem>>,
+    items: Rc<RefCell<HashMap<PathBuf, InMemoryItem>>>,
 }
 
 impl InMemoryFS {
@@ -25,7 +26,7 @@ impl InMemoryFS {
         );
 
         InMemoryFS {
-            items: RefCell::new(initial_items),
+            items: Rc::new(RefCell::new(initial_items)),
         }
     }
 
@@ -60,7 +61,7 @@ impl InMemoryFS {
 
     fn parent_exists<P: AsRef<Path>>(&self, path: P) -> bool {
         if let Some(parent) = path.as_ref().parent() {
-            self.items.borrow().get(parent).map_or(false, |entry| {
+            self.items.borrow_mut().get(parent).map_or(false, |entry| {
                 match entry.metadata.file_type() {
                     FileType::Dir => true,
                     FileType::Link => true,
@@ -76,12 +77,21 @@ impl InMemoryFS {
         let parent_path_buf = path.as_ref().to_path_buf();
 
         self.items
-            .borrow()
+            .borrow_mut()
             .deref()
             .iter()
             .any(|(path, _)| path.parent() == Some(parent_path_buf.borrow()))
     }
 }
+
+impl Clone for InMemoryFS {
+    fn clone(&self) -> Self {
+        Self {
+            items: Rc::clone(&self.items),
+        }
+    }
+}
+
 impl FS for InMemoryFS {
     fn default() -> Self {
         Self::new()
@@ -99,7 +109,7 @@ impl FS for InMemoryFS {
     fn metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata> {
         let path = self.canonicalize(path)?;
 
-        if let Some(item) = self.items.borrow().deref().get(&path) {
+        if let Some(item) = self.items.borrow_mut().deref().get(&path) {
             Ok(item.metadata.clone())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
@@ -110,7 +120,7 @@ impl FS for InMemoryFS {
         let path = self.canonicalize(path)?;
 
         if self.is_root(&path) || self.parent_exists(&path) {
-            if self.items.borrow().deref().contains_key(&path) {
+            if self.items.borrow_mut().deref().contains_key(&path) {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
 
@@ -127,10 +137,10 @@ impl FS for InMemoryFS {
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>> {
         let path = self.canonicalize(path)?;
 
-        if self.items.borrow().deref().contains_key(&path) {
+        if self.items.borrow_mut().deref().contains_key(&path) {
             let items = self
                 .items
-                .borrow()
+                .borrow_mut()
                 .deref()
                 .iter()
                 .filter(|(item_path, _)| {
@@ -155,7 +165,7 @@ impl FS for InMemoryFS {
         let path = self.canonicalize(path)?;
 
         if self.is_root(&path) || self.parent_exists(&path) {
-            if self.items.borrow().deref().contains_key(&path) {
+            if self.items.borrow_mut().deref().contains_key(&path) {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
             self.items
@@ -183,11 +193,15 @@ impl FS for InMemoryFS {
     fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>> {
         let path = self.canonicalize(path)?;
 
-        if let Some(item) = self.items.borrow().get(&path) {
+        if let Some(item) = self.items.borrow_mut().get(&path) {
             Ok(Box::new(std::io::Cursor::new(item.data.clone())))
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
         }
+    }
+
+    fn db_access_type(&self) -> DBAccessType {
+        DBAccessType::InMemory
     }
 }
 

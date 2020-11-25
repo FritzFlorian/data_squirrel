@@ -8,7 +8,7 @@ use std::fmt;
 use rusqlite;
 
 #[derive(Debug)]
-pub enum MetadataError {
+pub enum MetadataDBError {
     DBMigrationError {
         source: db_migration::MigrationError,
     },
@@ -20,15 +20,15 @@ pub enum MetadataError {
         message: &'static str,
     },
 }
-pub type Result<T> = std::result::Result<T, MetadataError>;
+pub type Result<T> = std::result::Result<T, MetadataDBError>;
 
-pub struct MetadataStore {
+pub struct MetadataDB {
     connection: rusqlite::Connection,
 }
 
-impl MetadataStore {
-    pub fn open(path: &str) -> Result<MetadataStore> {
-        let result = MetadataStore {
+impl MetadataDB {
+    pub fn open(path: &str) -> Result<MetadataDB> {
+        let result = MetadataDB {
             connection: rusqlite::Connection::open(path)?,
         };
 
@@ -43,7 +43,7 @@ impl MetadataStore {
 
         // Make sure we only hold ONE data_set instance in our database for now.
         if let Some(_) = DataSet::get(&transaction)? {
-            return Err(MetadataError::ViolatesDBConsistency {
+            return Err(MetadataDBError::ViolatesDBConsistency {
                 message: "The database may only hold exactly ONE data_store!",
             });
         }
@@ -60,7 +60,7 @@ impl MetadataStore {
         if let Some(result) = DataSet::get(&self.connection)? {
             Ok(result)
         } else {
-            Err(MetadataError::NotFound)
+            Err(MetadataDBError::NotFound)
         }
     }
 
@@ -86,22 +86,22 @@ impl MetadataStore {
 }
 
 // Error Boilerplate (Error display, conversion and source)
-impl fmt::Display for MetadataError {
+impl fmt::Display for MetadataDBError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Error During Metadata Interaction({:?})", self)
     }
 }
-impl From<db_migration::MigrationError> for MetadataError {
+impl From<db_migration::MigrationError> for MetadataDBError {
     fn from(error: db_migration::MigrationError) -> Self {
         Self::DBMigrationError { source: error }
     }
 }
-impl From<rusqlite::Error> for MetadataError {
+impl From<rusqlite::Error> for MetadataDBError {
     fn from(error: rusqlite::Error) -> Self {
         Self::GenericSQLError { source: error }
     }
 }
-impl Error for MetadataError {
+impl Error for MetadataDBError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::DBMigrationError { ref source } => Some(source),
@@ -116,8 +116,8 @@ impl Error for MetadataError {
 mod tests {
     use super::*;
 
-    fn open_metadata_store() -> MetadataStore {
-        MetadataStore::open(":memory:").unwrap()
+    fn open_metadata_store() -> MetadataDB {
+        MetadataDB::open(":memory:").unwrap()
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
 
         metadata_store.create_data_set("abc").unwrap();
         match metadata_store.create_data_set("xyz") {
-            Err(MetadataError::ViolatesDBConsistency { .. }) => (),
+            Err(MetadataDBError::ViolatesDBConsistency { .. }) => (),
             _ => panic!("Must not have more than one data_set in DB!"),
         }
     }

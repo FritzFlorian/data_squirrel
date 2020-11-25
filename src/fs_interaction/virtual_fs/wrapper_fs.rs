@@ -1,6 +1,7 @@
 use super::*;
 use std::fs;
 
+#[derive(Clone)]
 pub struct WrapperFS {}
 impl FS for WrapperFS {
     fn default() -> Self {
@@ -60,5 +61,9 @@ impl FS for WrapperFS {
             .open(path.as_ref())?;
 
         Ok(Box::new(reader))
+    }
+
+    fn db_access_type(&self) -> DBAccessType {
+        DBAccessType::InPlace
     }
 }
