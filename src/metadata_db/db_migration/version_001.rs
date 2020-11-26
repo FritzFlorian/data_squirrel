@@ -4,6 +4,7 @@ pub fn migrate(connection: &rusqlite::Connection) -> Result<()> {
     create_table_data_set(&connection)?;
     create_table_data_store(&connection)?;
     create_table_data_item(&connection)?;
+    create_table_item_metadata(&connection)?;
     create_table_owner_information(&connection)?;
     create_table_mod_time(&connection)?;
     create_table_sync_time(&connection)?;
@@ -34,6 +35,7 @@ fn create_table_data_store(connection: &rusqlite::Connection) -> rusqlite::Resul
         "CREATE TABLE data_store(
                 id                  INTEGER PRIMARY KEY,
                 data_set_id         INTEGER NOT NULL,
+
                 unique_name         TEXT NOT NULL,
                 human_name          TEXT NOT NULL,
                 creation_date       TEXT NOT NULL,
@@ -68,11 +70,34 @@ fn create_table_data_item(connection: &rusqlite::Connection) -> rusqlite::Result
                 name                TEXT NOT NULL,
                 path                TEXT NOT NULL,
                 
-                is_file             INTEGER NOT NULL,
+                is_file             INTEGER NOT NULL, 
 
                 UNIQUE(creator_store_id, creator_version),
                 FOREIGN KEY(creator_store_id)   REFERENCES data_store(id),
                 FOREIGN KEY(parent_item_id)     REFERENCES data_item(id)
+            )",
+        rusqlite::params![],
+    )?;
+
+    Ok(())
+}
+
+// Metadata associated to a data item from the view of a specific data store.
+// Usually, we will only keep information on our local data_store, as this is required for
+// detecting local updates. However, in some use cases we might want to communicate other
+// metadata, thus also keep it.
+fn create_table_item_metadata(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
+    connection.execute(
+        "CREATE TABLE item_metadata(
+                id                  INTEGER PRIMARY KEY,
+
+                data_store_id       INTEGER NOT NULL,
+
+                creation_time       TEXT NOT NULL,
+                mod_time            TEXT NOT NULL,
+                hash                TEXT NOT NULL,
+    
+                FOREIGN KEY(data_store_id)      REFERENCES data_store(id)
             )",
         rusqlite::params![],
     )?;

@@ -5,7 +5,7 @@ authors = ["Fritz Florian <flo.fritz@t-online.de>"]
 
 [dependencies.rusqlite]
 version = "0.24.1"
-features = ["bundled"]
+features = ["bundled", "chrono"]
 
 [dependencies.tempfile]
 version = "3"
@@ -15,3 +15,9 @@ version = "0.2"
 
 [dependencies.ring]
 version = "0.16"
+
+[dependencies.data-encoding]
+version = "2.3"
+
+[dependencies.chrono]
+version = "0.4"

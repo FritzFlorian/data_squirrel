@@ -1,3 +1,5 @@
+extern crate chrono;
+extern crate data_encoding;
 extern crate filetime;
 extern crate ring;
 extern crate rusqlite;

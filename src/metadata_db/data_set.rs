@@ -2,68 +2,49 @@ use rusqlite;
 
 #[derive(Debug)]
 pub struct DataSet {
-    id: i64,
+    pub id: i64,
     pub unique_name: String,
     pub human_name: String,
 }
 
 impl DataSet {
-    pub fn get_id(&self) -> i64 {
-        self.id
+    pub fn map_rows(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(DataSet {
+            id: row.get(row.column_index("id")?)?,
+            unique_name: row.get(row.column_index("unique_name")?)?,
+            human_name: row.get(row.column_index("human_name")?)?,
+        })
     }
 
-    pub fn create(connection: &rusqlite::Connection, unique_name: &str) -> rusqlite::Result<()> {
+    pub fn create(connection: &rusqlite::Connection, unique_name: &str) -> rusqlite::Result<Self> {
         let mut query = connection.prepare(
             "
             INSERT INTO data_set(unique_name, human_name)
-            VALUES (:unique_name, '')
+            VALUES (?, '')
         ",
         )?;
+        let row_id = query.insert(rusqlite::params![unique_name])?;
 
-        query.execute_named(rusqlite::named_params! {
-            ":unique_name": &unique_name,
-        })?;
-
-        Ok(())
+        Ok(DataSet {
+            id: row_id,
+            unique_name: unique_name.to_string(),
+            human_name: String::new(),
+        })
     }
 
     pub fn get(connection: &rusqlite::Connection) -> rusqlite::Result<Option<DataSet>> {
         let mut query = connection.prepare(
             "
-            SELECT id, unique_name, human_name FROM data_set LIMIT 1
+            SELECT * FROM data_set LIMIT 1
         ",
         )?;
 
-        let mut data_set = query.query_map(rusqlite::params![], |row| {
-            Ok(DataSet {
-                id: row.get(0)?,
-                unique_name: row.get(1)?,
-                human_name: row.get(2)?,
-            })
-        })?;
+        let mut data_set = query.query_map(rusqlite::params![], Self::map_rows)?;
 
         if let Some(result) = data_set.next() {
             Ok(Some(result?))
         } else {
             Ok(None)
         }
-    }
-
-    pub fn update(&self, connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-        let mut query = connection.prepare(
-            "
-            UPDATE data_set
-            SET unique_name = :unique_name, human_name = :human_name
-            WHERE id = :id
-        ",
-        )?;
-
-        query.execute_named(rusqlite::named_params! {
-            ":id" : &self.id,
-            ":unique_name" : &self.unique_name,
-            ":human_name" : &self.human_name
-        })?;
-
-        Ok(())
     }
 }

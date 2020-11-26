@@ -66,7 +66,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     virtual_fs::FileType::File => {
                         println!("Indexing File {:?}...", item.relative_path);
                         let hash = self.fs_access.calculate_hash(&item.relative_path)?;
-                        println!("Hash: {:?}", hash);
+
+                        use data_encoding::HEXUPPER;
+                        println!("Hash: {:}", HEXUPPER.encode(hash.as_ref()));
                     }
                     virtual_fs::FileType::Link => {
                         println!("Skipping Link {:?}...", item.relative_path);
@@ -87,12 +89,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
         Ok(())
     }
+
+    fn file_version(&self, relative_path: &Path) -> Result<version_vector::VersionVector> {
+        // TODO: look up the desired path in our database
+        Ok(version_vector::VersionVector::new())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
 
     #[test]
     fn create_data_store() {
@@ -125,8 +133,14 @@ mod tests {
         fs::create_dir(test_dir.path().join(&PathBuf::from("sub-1/sub-1-1"))).unwrap();
         fs::create_dir(test_dir.path().join(&PathBuf::from("sub-2"))).unwrap();
 
-        fs::File::create(test_dir.path().join(&PathBuf::from("file-1"))).unwrap();
-        fs::File::create(test_dir.path().join(&PathBuf::from("file-2"))).unwrap();
+        fs::File::create(test_dir.path().join(&PathBuf::from("file-1")))
+            .unwrap()
+            .write_all("Hello!".as_bytes())
+            .unwrap();
+        fs::File::create(test_dir.path().join(&PathBuf::from("file-2")))
+            .unwrap()
+            .write_all("World!".as_bytes())
+            .unwrap();
         fs::File::create(test_dir.path().join(&PathBuf::from("sub-1/file-1"))).unwrap();
 
         let data_store_1 = DefaultDataStore::open(test_dir.path(), true).unwrap();

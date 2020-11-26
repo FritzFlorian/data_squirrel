@@ -1,7 +1,10 @@
 mod db_migration;
 // CRUD operations/basic entity mappings on database tables
 mod data_set;
-use self::data_set::DataSet;
+pub use self::data_set::DataSet;
+mod data_store;
+pub use self::data_store::DataStore;
+
 use std::error::Error;
 use std::fmt;
 
@@ -28,7 +31,7 @@ pub struct MetadataDB {
 
 impl MetadataDB {
     pub fn open(path: &str) -> Result<MetadataDB> {
-        let result = MetadataDB {
+        let mut result = MetadataDB {
             connection: rusqlite::Connection::open(path)?,
         };
 
@@ -42,7 +45,7 @@ impl MetadataDB {
         let transaction = self.connection.transaction()?;
 
         // Make sure we only hold ONE data_set instance in our database for now.
-        if let Some(_) = DataSet::get(&transaction)? {
+        if DataSet::get(&transaction)?.is_some() {
             return Err(MetadataDBError::ViolatesDBConsistency {
                 message: "The database may only hold exactly ONE data_store!",
             });
@@ -64,14 +67,55 @@ impl MetadataDB {
         }
     }
 
-    pub fn update_data_set(&self, data_set: &DataSet) -> Result<()> {
-        data_set.update(&self.connection)?;
+    pub fn update_data_set_name(&self, human_name: &str) -> Result<()> {
+        let mut query = self.connection.prepare(
+            "
+            UPDATE data_set
+            SET human_name = ?
+        ",
+        )?;
+        query.execute(rusqlite::params![&human_name])?;
 
         Ok(())
     }
 
-    fn upgrade_db(&self) -> db_migration::Result<()> {
-        db_migration::upgrade_db(&self.connection)?;
+    pub fn get_data_stores(&self) -> Result<Vec<DataStore>> {
+        let data_set = self.get_data_set()?;
+        Ok(DataStore::get_all(&self.connection, &data_set, None)?)
+    }
+
+    pub fn create_data_store(
+        &mut self,
+        unique_name: &str,
+        path: &str,
+        is_this_store: bool,
+    ) -> Result<DataStore> {
+        let data_set = self.get_data_set()?;
+
+        let transaction = self.connection.transaction()?;
+        if DataStore::get(&transaction, &data_set, &unique_name)?.is_some() {
+            return Err(MetadataDBError::ViolatesDBConsistency {
+                message: "A data_store with the same unique_name exists!",
+            });
+        }
+
+        Ok(DataStore::create(
+            &transaction,
+            &data_set,
+            &unique_name,
+            "",
+            chrono::Utc::now().naive_local(),
+            &path,
+            "",
+            is_this_store,
+            0,
+        )?)
+    }
+
+    fn upgrade_db(&mut self) -> db_migration::Result<()> {
+        let transaction = self.connection.transaction()?;
+        db_migration::upgrade_db(&transaction)?;
+        transaction.commit()?;
 
         Ok(())
     }
@@ -127,12 +171,11 @@ mod tests {
         assert!(metadata_store.get_data_set().is_err());
 
         metadata_store.create_data_set("abc").unwrap();
-        let mut data_set = metadata_store.get_data_set().unwrap();
+        let data_set = metadata_store.get_data_set().unwrap();
         assert_eq!(data_set.unique_name, "abc");
         assert_eq!(data_set.human_name, "");
 
-        data_set.human_name = "testing".to_string();
-        metadata_store.update_data_set(&data_set).unwrap();
+        metadata_store.update_data_set_name("testing").unwrap();
         let data_set = metadata_store.get_data_set().unwrap();
         assert_eq!(data_set.unique_name, "abc");
         assert_eq!(data_set.human_name, "testing");
