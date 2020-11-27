@@ -1,13 +1,13 @@
-use super::Result;
+use super::*;
 
-pub fn migrate(connection: &rusqlite::Connection) -> Result<()> {
-    create_table_data_set(&connection)?;
-    create_table_data_store(&connection)?;
-    create_table_data_item(&connection)?;
-    create_table_item_metadata(&connection)?;
-    create_table_owner_information(&connection)?;
-    create_table_mod_time(&connection)?;
-    create_table_sync_time(&connection)?;
+pub fn migrate(conn: &SqliteConnection) -> Result<()> {
+    create_table_data_sets(&conn)?;
+    create_table_data_stores(&conn)?;
+    create_table_data_items(&conn)?;
+    create_table_item_metadatas(&conn)?;
+    create_table_owner_informations(&conn)?;
+    create_table_mod_times(&conn)?;
+    create_table_sync_times(&conn)?;
 
     Ok(())
 }
@@ -15,39 +15,39 @@ pub fn migrate(connection: &rusqlite::Connection) -> Result<()> {
 // A data_set is a unique identifier for a data set being synchronized.
 // There can be multiple physical copies of one logical data_set,
 // all kept in sync by the software.
-fn create_table_data_set(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE data_set (
-                id              INTEGER PRIMARY KEY,
+fn create_table_data_sets(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE data_sets(
+                id              INTEGER PRIMARY KEY NOT NULL,
                 unique_name     TEXT NOT NULL UNIQUE,
-                human_name      TEXT NOT NULL 
+                human_name      TEXT NOT NULL DEFAULT ''
              )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }
 
 // A data_store is a physical copy of a dataset. It lives on a users storage
 // device in form of a folder that is kept in sync with other device's folders.
-fn create_table_data_store(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE data_store(
-                id                  INTEGER PRIMARY KEY,
+fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE data_stores(
+                id                  INTEGER PRIMARY KEY NOT NULL,
                 data_set_id         INTEGER NOT NULL,
 
                 unique_name         TEXT NOT NULL,
-                human_name          TEXT NOT NULL,
+                human_name          TEXT NOT NULL DEFAULT '',
                 creation_date       TEXT NOT NULL,
                 path_on_device      TEXT NOT NULL,
-                location_note       TEXT NOT NULL,
+                location_note       TEXT NOT NULL DEFAULT '',
                 is_this_store       INTEGER NOT NULL,
                 version             INTEGER NOT NULL,
 
                 FOREIGN KEY(data_set_id)    REFERENCES data_set(id)
              )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }
@@ -57,27 +57,25 @@ fn create_table_data_store(connection: &rusqlite::Connection) -> rusqlite::Resul
 // created in (a pair of creator_store_id and creator_version time stamp).
 //
 // Data_items form a tree like structure by defining their parent_item_id.
-fn create_table_data_item(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE data_item(
-                id                  INTEGER PRIMARY KEY,
+fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE data_items(
+                id                  INTEGER PRIMARY KEY NOT NULL,
                 
                 creator_store_id    INTEGER NOT NULL,
                 creator_version     INTEGER NOT NULL,
 
                 parent_item_id      INTEGER,
 
-                name                TEXT NOT NULL,
                 path                TEXT NOT NULL,
-                
                 is_file             INTEGER NOT NULL, 
 
                 UNIQUE(creator_store_id, creator_version),
                 FOREIGN KEY(creator_store_id)   REFERENCES data_store(id),
                 FOREIGN KEY(parent_item_id)     REFERENCES data_item(id)
             )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }
@@ -86,10 +84,10 @@ fn create_table_data_item(connection: &rusqlite::Connection) -> rusqlite::Result
 // Usually, we will only keep information on our local data_store, as this is required for
 // detecting local updates. However, in some use cases we might want to communicate other
 // metadata, thus also keep it.
-fn create_table_item_metadata(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE item_metadata(
-                id                  INTEGER PRIMARY KEY,
+fn create_table_item_metadatas(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE item_metadatas(
+                id                  INTEGER PRIMARY KEY NOT NULL,
 
                 data_store_id       INTEGER NOT NULL,
 
@@ -99,8 +97,8 @@ fn create_table_item_metadata(connection: &rusqlite::Connection) -> rusqlite::Re
     
                 FOREIGN KEY(data_store_id)      REFERENCES data_store(id)
             )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }
@@ -118,10 +116,10 @@ fn create_table_item_metadata(connection: &rusqlite::Connection) -> rusqlite::Re
 // about them. This can very depending on the use-case (might be user configurable later on)
 // and can therefore range from enough information to know that we might need to send data to a
 // site up to all information about the other site.
-fn create_table_owner_information(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE owner_information(
-                id              INTEGER PRIMARY KEY,
+fn create_table_owner_informations(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE owner_informations(
+                id              INTEGER PRIMARY KEY NOT NULL,
 
                 data_store_id   INTEGER NOT NULL,
                 data_item_id    INTEGER NOT NULL,
@@ -130,8 +128,8 @@ fn create_table_owner_information(connection: &rusqlite::Connection) -> rusqlite
                 FOREIGN KEY(data_store_id)      REFERENCES data_store(id),
                 FOREIGN KEY(data_item_id)       REFERENCES data_item(id)
             )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }
@@ -140,10 +138,10 @@ fn create_table_owner_information(connection: &rusqlite::Connection) -> rusqlite
 // i.e. it encodes the information of the form:
 // "data_item from the view of owner_information has modification time stamp
 //  data_store -> time (the time the data_item was modified most recently by the data_store)"
-fn create_table_mod_time(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE mod_time(
-                id                      INTEGER PRIMARY_KEY,
+fn create_table_mod_times(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE mod_times(
+                id                      INTEGER PRIMARY KEY NOT NULL,
                 
                 owner_information_id    INTEGER NOT NULL,
                 
@@ -154,8 +152,8 @@ fn create_table_mod_time(connection: &rusqlite::Connection) -> rusqlite::Result<
                 FOREIGN KEY(owner_information_id)   REFERENCES owner_information(id),
                 FOREIGN KEY(data_store_id)          REFERENCES data_store(id)
             )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }
@@ -164,10 +162,10 @@ fn create_table_mod_time(connection: &rusqlite::Connection) -> rusqlite::Result<
 // i.e. it encodes the information of the form:
 // "data_item from the view of owner_information has synchronization time stamp
 //  data_store -> time (the time the data_item was synchronized most recently with the data_store)"
-fn create_table_sync_time(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute(
-        "CREATE TABLE sync_time(
-                id                      INTEGER PRIMARY_KEY,
+fn create_table_sync_times(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE sync_times(
+                id                      INTEGER PRIMARY KEY NOT NULL,
                 
                 owner_information_id    INTEGER NOT NULL,
                 
@@ -178,8 +176,8 @@ fn create_table_sync_time(connection: &rusqlite::Connection) -> rusqlite::Result
                 FOREIGN KEY(owner_information_id)   REFERENCES owner_information(id),
                 FOREIGN KEY(data_store_id)          REFERENCES data_store(id)
             )",
-        rusqlite::params![],
-    )?;
+    )
+    .execute(conn)?;
 
     Ok(())
 }

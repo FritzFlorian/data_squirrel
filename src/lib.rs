@@ -1,8 +1,9 @@
 extern crate chrono;
 extern crate data_encoding;
+#[macro_use]
+extern crate diesel;
 extern crate filetime;
 extern crate ring;
-extern crate rusqlite;
 extern crate tempfile;
 
 pub mod data_store;

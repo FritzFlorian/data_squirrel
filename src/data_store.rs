@@ -65,16 +65,28 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 match item.metadata.as_ref().unwrap().file_type() {
                     virtual_fs::FileType::File => {
                         println!("Indexing File {:?}...", item.relative_path);
-                        let hash = self.fs_access.calculate_hash(&item.relative_path)?;
-
-                        use data_encoding::HEXUPPER;
-                        println!("Hash: {:}", HEXUPPER.encode(hash.as_ref()));
+                        // TODO: load file metadata from DB (metadata and hash)
+                        // if metadata differs
+                        {
+                            let hash = self.fs_access.calculate_hash(&item.relative_path)?;
+                            use data_encoding::HEXUPPER;
+                            println!("Hash: {:}", HEXUPPER.encode(hash.as_ref()));
+                            // if hash differs
+                            {
+                                // record update in modification version vector
+                                // TODO: instruct DB to increase version vectors.
+                            }
+                        }
+                        // else optional bit-rot detection hash calculation
                     }
                     virtual_fs::FileType::Link => {
                         println!("Skipping Link {:?}...", item.relative_path);
                     }
                     virtual_fs::FileType::Dir => {
                         println!("Indexing Directory {:?}...", item.relative_path);
+                        // TODO: How do we handle directories?
+                        //       -> Do not sync empty directories for now?
+                        //       -> In that case directories are simply there if they contain files.
                         self.perform_scan(&item.relative_path)?;
                     }
                 }
@@ -87,10 +99,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 );
             }
         }
+        // TODO: Look at all items that are in DB but no longer present in folder.
+        //       We need to delete them and recursively delete their child entries.
         Ok(())
     }
 
-    fn file_version(&self, relative_path: &Path) -> Result<version_vector::VersionVector> {
+    fn file_version(&self, _relative_path: &Path) -> Result<version_vector::VersionVector> {
         // TODO: look up the desired path in our database
         Ok(version_vector::VersionVector::new())
     }

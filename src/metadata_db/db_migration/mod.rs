@@ -4,21 +4,22 @@
 /// upgrade_db(&connection); // upgrades to latest DB version
 mod version_001;
 
-use rusqlite;
+use diesel::prelude::*;
+use diesel::sql_query;
+use diesel::sqlite::SqliteConnection;
 use std::error::Error;
 use std::fmt;
 
 #[derive(Debug)]
 pub enum MigrationError {
-    ReadWriteDBVersion { source: rusqlite::Error },
+    ReadWriteDBVersion { source: diesel::result::Error },
     UnknownDBVersion { version: DBVersion },
-    SQLError { source: rusqlite::Error },
+    SQLError { source: diesel::result::Error },
 }
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
-pub type DBVersion = u32;
+pub type DBVersion = i32;
 const REQUIRED_DB_VERSION: DBVersion = 1;
-const PRAGMA_USER_VERSION: &str = "user_version";
 
 /// Upgrades the given database connection to the REQUIRED_DB_VERSION of the
 /// current application build.
@@ -27,11 +28,11 @@ const PRAGMA_USER_VERSION: &str = "user_version";
 /// used to step-by-step keep database files up to date with the application.
 ///
 /// MUST be run before any other action on the database to make sure it's compatible.
-pub fn upgrade_db(connection: &rusqlite::Connection) -> Result<DBVersion> {
+pub fn upgrade_db(conn: &SqliteConnection) -> Result<DBVersion> {
     loop {
-        let current_version = read_db_version(&connection)?;
+        let current_version = read_db_version(&conn)?;
         if current_version < REQUIRED_DB_VERSION {
-            migrate_up_from(connection, current_version)?;
+            migrate_up_from(conn, current_version)?;
         } else {
             return Ok(current_version);
         }
@@ -44,32 +45,35 @@ pub fn upgrade_db(connection: &rusqlite::Connection) -> Result<DBVersion> {
 ///
 /// Does not wrap the operation in a transaction,
 /// the caller is supposed to if a rollback might be required.
-fn migrate_up_from(connection: &rusqlite::Connection, version: DBVersion) -> Result<()> {
+fn migrate_up_from(conn: &SqliteConnection, version: DBVersion) -> Result<()> {
     match version {
         // Just run the know migration steps as a regular functions.
-        0 => version_001::migrate(&connection)?,
+        0 => version_001::migrate(&conn)?,
         // We do not know how to handle this migration.
         _ => return Err(MigrationError::UnknownDBVersion { version }),
     };
 
-    write_db_version(&connection, version + 1)?;
+    write_db_version(&conn, version + 1)?;
     Ok(())
 }
 
-fn read_db_version(connection: &rusqlite::Connection) -> Result<DBVersion> {
-    let version = connection
-        .pragma_query_value(None, PRAGMA_USER_VERSION, |row| {
-            let version: DBVersion = row.get(0)?;
-            Ok(version)
-        })
+fn read_db_version(conn: &SqliteConnection) -> Result<DBVersion> {
+    use diesel::sql_types::Integer;
+    #[derive(Debug, QueryableByName)]
+    struct Test {
+        #[sql_type = "Integer"]
+        user_version: DBVersion,
+    }
+    let version: Vec<Test> = sql_query("PRAGMA user_version")
+        .load(conn)
         .map_err(|source| MigrationError::ReadWriteDBVersion { source })?;
 
-    Ok(version)
+    Ok(version.get(0).unwrap().user_version)
 }
 
-fn write_db_version(connection: &rusqlite::Connection, version: DBVersion) -> Result<()> {
-    connection
-        .pragma_update(None, PRAGMA_USER_VERSION, &version)
+fn write_db_version(conn: &SqliteConnection, version: DBVersion) -> Result<()> {
+    sql_query(format!("PRAGMA user_version = {:}", version))
+        .execute(conn)
         .map_err(|source| MigrationError::ReadWriteDBVersion { source })?;
 
     Ok(())
@@ -81,8 +85,8 @@ impl fmt::Display for MigrationError {
         write!(f, "Error During Database Migration ({:?})", self)
     }
 }
-impl From<rusqlite::Error> for MigrationError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<diesel::result::Error> for MigrationError {
+    fn from(error: diesel::result::Error) -> Self {
         Self::SQLError { source: error }
     }
 }
@@ -100,54 +104,58 @@ impl Error for MigrationError {
 mod tests {
     use super::*;
 
-    fn open_connection() -> rusqlite::Connection {
-        rusqlite::Connection::open_in_memory().unwrap()
+    fn open_connection() -> SqliteConnection {
+        SqliteConnection::establish(":memory:").unwrap()
     }
 
-    fn query_table_names(connection: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
-        let mut query = connection.prepare("SELECT name FROM sqlite_schema")?;
-        let rows = query.query_map(rusqlite::params![], |row| {
-            let name: String = row.get(0)?;
-            Ok(name)
-        })?;
+    fn query_table_names(conn: &SqliteConnection) -> Vec<String> {
+        use diesel::sql_types::Text;
+        #[derive(Debug, QueryableByName)]
+        struct Test {
+            #[sql_type = "Text"]
+            name: String,
+        }
 
-        rows.collect()
+        let result: Vec<Test> = sql_query("SELECT name FROM sqlite_master")
+            .load(conn)
+            .unwrap();
+        result.iter().map(|test| test.name.clone()).collect()
     }
 
     #[test]
     fn read_and_write_db_version() {
-        let connection = open_connection();
+        let conn = open_connection();
 
-        assert_eq!(read_db_version(&connection).unwrap(), 0);
-        write_db_version(&connection, 42).unwrap();
-        assert_eq!(read_db_version(&connection).unwrap(), 42);
+        assert_eq!(read_db_version(&conn).unwrap(), 0);
+        write_db_version(&conn, 42).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), 42);
     }
 
     #[test]
     fn properly_upgrade_to_version_1() {
-        let connection = open_connection();
+        let conn = open_connection();
 
-        assert_eq!(read_db_version(&connection).unwrap(), 0);
+        assert_eq!(read_db_version(&conn).unwrap(), 0);
 
-        migrate_up_from(&connection, 0).unwrap();
+        migrate_up_from(&conn, 0).unwrap();
 
-        let table_names = query_table_names(&connection).unwrap();
-        assert!(table_names.contains(&"data_set".to_string()));
-        assert!(table_names.contains(&"data_store".to_string()));
-        assert!(table_names.contains(&"data_item".to_string()));
-        assert!(table_names.contains(&"item_metadata".to_string()));
-        assert!(table_names.contains(&"owner_information".to_string()));
-        assert!(table_names.contains(&"mod_time".to_string()));
-        assert!(table_names.contains(&"sync_time".to_string()));
+        let table_names = query_table_names(&conn);
+        assert!(table_names.contains(&"data_sets".to_string()));
+        assert!(table_names.contains(&"data_stores".to_string()));
+        assert!(table_names.contains(&"data_items".to_string()));
+        assert!(table_names.contains(&"item_metadatas".to_string()));
+        assert!(table_names.contains(&"owner_informations".to_string()));
+        assert!(table_names.contains(&"mod_times".to_string()));
+        assert!(table_names.contains(&"sync_times".to_string()));
 
-        assert_eq!(read_db_version(&connection).unwrap(), 1);
+        assert_eq!(read_db_version(&conn).unwrap(), 1);
     }
 
     #[test]
     fn properly_upgrade_to_required_version() {
-        let connection = open_connection();
+        let conn = open_connection();
 
-        upgrade_db(&connection).unwrap();
-        assert_eq!(read_db_version(&connection).unwrap(), REQUIRED_DB_VERSION);
+        upgrade_db(&conn).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), REQUIRED_DB_VERSION);
     }
 }

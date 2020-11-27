@@ -1,5 +1,7 @@
 mod db_migration;
-// CRUD operations/basic entity mappings on database tables
+// Database schema - must be kept up to date manually
+mod schema;
+// Basic entity mappings on database tables
 mod data_set;
 pub use self::data_set::DataSet;
 mod data_store;
@@ -8,15 +10,20 @@ pub use self::data_store::DataStore;
 use std::error::Error;
 use std::fmt;
 
-use rusqlite;
+use diesel::prelude::*;
+use diesel::sql_query;
+use diesel::sqlite::SqliteConnection;
 
 #[derive(Debug)]
 pub enum MetadataDBError {
     DBMigrationError {
         source: db_migration::MigrationError,
     },
+    DBConnectionError {
+        source: diesel::result::ConnectionError,
+    },
     GenericSQLError {
-        source: rusqlite::Error,
+        source: diesel::result::Error,
     },
     NotFound,
     ViolatesDBConsistency {
@@ -26,13 +33,13 @@ pub enum MetadataDBError {
 pub type Result<T> = std::result::Result<T, MetadataDBError>;
 
 pub struct MetadataDB {
-    connection: rusqlite::Connection,
+    conn: SqliteConnection,
 }
 
 impl MetadataDB {
     pub fn open(path: &str) -> Result<MetadataDB> {
-        let mut result = MetadataDB {
-            connection: rusqlite::Connection::open(path)?,
+        let result = MetadataDB {
+            conn: SqliteConnection::establish(path)?,
         };
 
         result.default_db_settings()?;
@@ -41,89 +48,100 @@ impl MetadataDB {
         Ok(result)
     }
 
-    pub fn create_data_set(&mut self, unique_name: &str) -> Result<DataSet> {
-        let transaction = self.connection.transaction()?;
+    pub fn create_data_set(&self, unique_name_p: &str) -> Result<DataSet> {
+        use self::schema::data_sets::dsl::*;
 
-        // Make sure we only hold ONE data_set instance in our database for now.
-        if DataSet::get(&transaction)?.is_some() {
-            return Err(MetadataDBError::ViolatesDBConsistency {
-                message: "The database may only hold exactly ONE data_store!",
-            });
-        }
+        Ok(self.conn.transaction(|| {
+            if data_sets.first::<DataSet>(&self.conn).optional()?.is_some() {
+                return Err(MetadataDBError::ViolatesDBConsistency {
+                    message: "Must only have ONE data_set per database!",
+                });
+            }
 
-        DataSet::create(&transaction, unique_name)?;
+            diesel::insert_into(data_sets)
+                .values(data_set::FromUniqueName {
+                    unique_name: unique_name_p,
+                })
+                .execute(&self.conn)?;
 
-        let data_set = DataSet::get(&transaction)?.unwrap();
-
-        transaction.commit()?;
-        Ok(data_set)
+            let data_set = data_sets.first::<DataSet>(&self.conn)?;
+            Ok(data_set)
+        })?)
     }
 
     pub fn get_data_set(&self) -> Result<DataSet> {
-        if let Some(result) = DataSet::get(&self.connection)? {
-            Ok(result)
-        } else {
-            Err(MetadataDBError::NotFound)
-        }
+        use self::schema::data_sets::dsl::*;
+
+        Ok(data_sets.first::<DataSet>(&self.conn)?)
     }
 
-    pub fn update_data_set_name(&self, human_name: &str) -> Result<()> {
-        let mut query = self.connection.prepare(
-            "
-            UPDATE data_set
-            SET human_name = ?
-        ",
-        )?;
-        query.execute(rusqlite::params![&human_name])?;
+    pub fn update_data_set_name(&self, human_name_p: &str) -> Result<()> {
+        use self::schema::data_sets::dsl::*;
+
+        diesel::update(data_sets)
+            .set(human_name.eq(human_name_p))
+            .execute(&self.conn)?;
 
         Ok(())
     }
 
     pub fn get_data_stores(&self) -> Result<Vec<DataStore>> {
-        let data_set = self.get_data_set()?;
-        Ok(DataStore::get_all(&self.connection, &data_set, None)?)
+        use self::schema::data_stores::dsl::*;
+        // We currently only allow EXACTLY ONE data_set, thus we do not need to join here.
+        let result = data_stores.load(&self.conn)?;
+        Ok(result)
     }
 
     pub fn create_data_store(
-        &mut self,
-        unique_name: &str,
-        path: &str,
-        is_this_store: bool,
+        &self,
+        new_store: data_store::FromRequiredFields,
     ) -> Result<DataStore> {
-        let data_set = self.get_data_set()?;
+        use self::schema::data_stores::dsl::*;
+        use diesel::dsl::*;
 
-        let transaction = self.connection.transaction()?;
-        if DataStore::get(&transaction, &data_set, &unique_name)?.is_some() {
-            return Err(MetadataDBError::ViolatesDBConsistency {
-                message: "A data_store with the same unique_name exists!",
-            });
-        }
+        let result = self.conn.transaction(|| {
+            // Check DB consistency
+            let this_store_already_exists =
+                select(exists(data_stores.filter(is_this_store.eq(true))))
+                    .get_result(&self.conn)?;
+            if this_store_already_exists {
+                return Err(MetadataDBError::ViolatesDBConsistency {
+                    message: "Must only have one data_store marked as local store!",
+                });
+            }
 
-        Ok(DataStore::create(
-            &transaction,
-            &data_set,
-            &unique_name,
-            "",
-            chrono::Utc::now().naive_local(),
-            &path,
-            "",
-            is_this_store,
-            0,
-        )?)
+            // Insert new entry
+            diesel::insert_into(data_stores)
+                .values(&new_store)
+                .execute(&self.conn)?;
+
+            let result = data_stores
+                .filter(unique_name.eq(new_store.unique_name))
+                .first::<DataStore>(&self.conn)?;
+            Ok(result)
+        })?;
+
+        Ok(result)
     }
 
-    fn upgrade_db(&mut self) -> db_migration::Result<()> {
-        let transaction = self.connection.transaction()?;
-        db_migration::upgrade_db(&transaction)?;
-        transaction.commit()?;
+    pub fn get_this_data_store(&self) -> Result<DataStore> {
+        use self::schema::data_stores::dsl::*;
+
+        Ok(data_stores
+            .filter(is_this_store.eq(true))
+            .first::<DataStore>(&self.conn)?)
+    }
+
+    fn upgrade_db(&self) -> db_migration::Result<()> {
+        self.conn
+            .transaction(|| db_migration::upgrade_db(&self.conn))?;
 
         Ok(())
     }
 
-    fn default_db_settings(&self) -> rusqlite::Result<()> {
-        self.connection
-            .pragma_update(None, "locking_mode", &"exclusive".to_string())?;
-        self.connection.pragma_update(None, "foreign_keys", &1)?;
+    fn default_db_settings(&self) -> Result<()> {
+        sql_query("PRAGMA locking_mode = exclusive").execute(&self.conn)?;
+        sql_query("PRAGMA foreign_keys = 1").execute(&self.conn)?;
 
         Ok(())
     }
@@ -140,15 +158,24 @@ impl From<db_migration::MigrationError> for MetadataDBError {
         Self::DBMigrationError { source: error }
     }
 }
-impl From<rusqlite::Error> for MetadataDBError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::GenericSQLError { source: error }
+impl From<diesel::result::Error> for MetadataDBError {
+    fn from(error: diesel::result::Error) -> Self {
+        match error {
+            diesel::result::Error::NotFound => Self::NotFound,
+            error => Self::GenericSQLError { source: error },
+        }
+    }
+}
+impl From<diesel::result::ConnectionError> for MetadataDBError {
+    fn from(error: diesel::result::ConnectionError) -> Self {
+        Self::DBConnectionError { source: error }
     }
 }
 impl Error for MetadataDBError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::DBMigrationError { ref source } => Some(source),
+            Self::DBConnectionError { ref source } => Some(source),
             Self::GenericSQLError { ref source } => Some(source),
             Self::ViolatesDBConsistency { .. } => None,
             Self::NotFound => None,
@@ -183,7 +210,7 @@ mod tests {
 
     #[test]
     fn enforces_single_data_set() {
-        let mut metadata_store = open_metadata_store();
+        let metadata_store = open_metadata_store();
 
         metadata_store.create_data_set("abc").unwrap();
         match metadata_store.create_data_set("xyz") {
