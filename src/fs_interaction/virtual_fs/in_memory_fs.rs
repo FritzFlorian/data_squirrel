@@ -30,16 +30,6 @@ impl InMemoryFS {
         }
     }
 
-    // pub fn debug_get_file_content<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<u8>> {
-    //     let path = self.canonicalize(path)?;
-    //
-    //     if let Some(item) = self.items.borrow().get(&path) {
-    //         Ok(item.data.clone())
-    //     } else {
-    //         Err(io::Error::from(io::ErrorKind::NotFound))
-    //     }
-    // }
-    #[cfg(test)]
     pub fn test_set_file_content<P: AsRef<Path>>(
         &self,
         path: P,
@@ -49,6 +39,19 @@ impl InMemoryFS {
 
         if let Some(item) = self.items.borrow_mut().get_mut(&path) {
             item.data = content;
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+    pub fn test_increase_file_mod_time<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let path = self.canonicalize(path)?;
+
+        if let Some(item) = self.items.borrow_mut().get_mut(&path) {
+            item.metadata.last_mod_time = FileTime::from_unix_time(
+                item.metadata.last_mod_time.unix_seconds() + 1,
+                item.metadata.last_mod_time.nanoseconds(),
+            );
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))

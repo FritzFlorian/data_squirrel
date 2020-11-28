@@ -5,6 +5,7 @@ extern crate diesel;
 extern crate filetime;
 extern crate ring;
 extern crate tempfile;
+extern crate uuid;
 
 pub mod data_store;
 pub mod fs_interaction;

@@ -4,7 +4,7 @@ pub fn migrate(conn: &SqliteConnection) -> Result<()> {
     create_table_data_sets(&conn)?;
     create_table_data_stores(&conn)?;
     create_table_data_items(&conn)?;
-    create_table_item_metadatas(&conn)?;
+    create_table_metadatas(&conn)?;
     create_table_owner_informations(&conn)?;
     create_table_mod_times(&conn)?;
     create_table_sync_times(&conn)?;
@@ -44,7 +44,7 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
                 is_this_store       INTEGER NOT NULL,
                 version             INTEGER NOT NULL,
 
-                FOREIGN KEY(data_set_id)    REFERENCES data_set(id)
+                FOREIGN KEY(data_set_id)    REFERENCES data_sets(id)
              )",
     )
     .execute(conn)?;
@@ -71,8 +71,8 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
                 is_file             INTEGER NOT NULL, 
 
                 UNIQUE(creator_store_id, creator_version),
-                FOREIGN KEY(creator_store_id)   REFERENCES data_store(id),
-                FOREIGN KEY(parent_item_id)     REFERENCES data_item(id)
+                FOREIGN KEY(creator_store_id)   REFERENCES data_stores(id),
+                FOREIGN KEY(parent_item_id)     REFERENCES data_items(id)
             )",
     )
     .execute(conn)?;
@@ -84,18 +84,18 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
 // Usually, we will only keep information on our local data_store, as this is required for
 // detecting local updates. However, in some use cases we might want to communicate other
 // metadata, thus also keep it.
-fn create_table_item_metadatas(conn: &SqliteConnection) -> Result<()> {
+fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
     sql_query(
-        "CREATE TABLE item_metadatas(
-                id                  INTEGER PRIMARY KEY NOT NULL,
+        "CREATE TABLE metadatas(
+                id                      INTEGER PRIMARY KEY NOT NULL,
 
-                data_store_id       INTEGER NOT NULL,
+                owner_information_id    INTEGER NOT NULL,
 
-                creation_time       TEXT NOT NULL,
-                mod_time            TEXT NOT NULL,
-                hash                TEXT NOT NULL,
+                creation_time           TEXT NOT NULL,
+                mod_time                TEXT NOT NULL,
+                hash                    TEXT NOT NULL,
     
-                FOREIGN KEY(data_store_id)      REFERENCES data_store(id)
+                FOREIGN KEY(owner_information_id)      REFERENCES owner_informations(id)
             )",
     )
     .execute(conn)?;
@@ -103,8 +103,8 @@ fn create_table_item_metadatas(conn: &SqliteConnection) -> Result<()> {
     Ok(())
 }
 
-// Data_items have no notion of modification/sync times, which in turn must be tailored to
-// what each individual data_store knows about them.
+// Data_items have no notion of modification/sync times and no metadata, which in turn must be
+// tailored to what each individual data_store knows about them.
 //
 // To fill this gap, the owner_information can associate this information to a data_item.
 // Each owner_information represents the knowledge that we know something about this data item
@@ -125,8 +125,8 @@ fn create_table_owner_informations(conn: &SqliteConnection) -> Result<()> {
                 data_item_id    INTEGER NOT NULL,
 
                 UNIQUE(data_store_id, data_item_id),
-                FOREIGN KEY(data_store_id)      REFERENCES data_store(id),
-                FOREIGN KEY(data_item_id)       REFERENCES data_item(id)
+                FOREIGN KEY(data_store_id)      REFERENCES data_stores(id),
+                FOREIGN KEY(data_item_id)       REFERENCES data_items(id)
             )",
     )
     .execute(conn)?;
@@ -149,8 +149,8 @@ fn create_table_mod_times(conn: &SqliteConnection) -> Result<()> {
                 time                    INTEGER NOT NULL,
 
                 UNIQUE(owner_information_id, data_store_id),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_information(id),
-                FOREIGN KEY(data_store_id)          REFERENCES data_store(id)
+                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id),
+                FOREIGN KEY(data_store_id)          REFERENCES data_stores(id)
             )",
     )
     .execute(conn)?;
@@ -173,8 +173,8 @@ fn create_table_sync_times(conn: &SqliteConnection) -> Result<()> {
                 time                    INTEGER NOT NULL,
 
                 UNIQUE(owner_information_id, data_store_id),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_information(id),
-                FOREIGN KEY(data_store_id)          REFERENCES data_store(id)
+                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id),
+                FOREIGN KEY(data_store_id)          REFERENCES data_stores(id)
             )",
     )
     .execute(conn)?;

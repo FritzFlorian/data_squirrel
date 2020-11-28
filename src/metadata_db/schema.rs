@@ -1,11 +1,11 @@
 table! {
     data_items (id) {
         id -> BigInt,
-        creator_store_id -> Integer,
-        creator_version -> Integer,
-        parent_item_id -> Nullable<Integer>,
+        creator_store_id -> BigInt,
+        creator_version -> BigInt,
+        parent_item_id -> Nullable<BigInt>,
         path -> Text,
-        is_file -> Integer,
+        is_file -> Bool,
     }
 }
 
@@ -32,11 +32,11 @@ table! {
 }
 
 table! {
-    item_metadatas (id) {
+    metadatas (id) {
         id -> BigInt,
-        data_store_id -> Integer,
-        creation_time -> Text,
-        mod_time -> Text,
+        owner_information_id-> BigInt,
+        creation_time -> Timestamp,
+        mod_time -> Timestamp,
         hash -> Text,
     }
 }
@@ -44,26 +44,26 @@ table! {
 table! {
     mod_times (id) {
         id -> BigInt,
-        owner_information_id -> Integer,
-        data_store_id -> Integer,
-        time -> Integer,
+        owner_information_id -> BigInt,
+        data_store_id -> BigInt,
+        time -> BigInt,
     }
 }
 
 table! {
     owner_informations (id) {
         id -> BigInt,
-        data_store_id -> Integer,
-        data_item_id -> Integer,
+        data_store_id -> BigInt,
+        data_item_id -> BigInt,
     }
 }
 
 table! {
     sync_times (id) {
         id -> BigInt,
-        owner_information_id -> Integer,
-        data_store_id -> Integer,
-        time -> Integer,
+        owner_information_id -> BigInt,
+        data_store_id -> BigInt,
+        time -> BigInt,
     }
 }
 
@@ -71,8 +71,17 @@ allow_tables_to_appear_in_same_query!(
     data_items,
     data_sets,
     data_stores,
-    item_metadatas,
+    metadatas,
     mod_times,
     owner_informations,
     sync_times,
 );
+
+joinable!(data_stores -> data_sets(data_set_id));
+joinable!(data_items -> data_stores(creator_store_id));
+// Can not use implicit self joins for data_items -> parent_item_id
+joinable!(owner_informations -> data_stores(data_store_id));
+joinable!(owner_informations -> data_items(data_item_id));
+joinable!(metadatas -> owner_informations(owner_information_id));
+joinable!(mod_times -> owner_informations(owner_information_id));
+joinable!(sync_times -> owner_informations(owner_information_id));

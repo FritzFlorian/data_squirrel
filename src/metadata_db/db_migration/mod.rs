@@ -143,7 +143,7 @@ mod tests {
         assert!(table_names.contains(&"data_sets".to_string()));
         assert!(table_names.contains(&"data_stores".to_string()));
         assert!(table_names.contains(&"data_items".to_string()));
-        assert!(table_names.contains(&"item_metadatas".to_string()));
+        assert!(table_names.contains(&"metadatas".to_string()));
         assert!(table_names.contains(&"owner_informations".to_string()));
         assert!(table_names.contains(&"mod_times".to_string()));
         assert!(table_names.contains(&"sync_times".to_string()));

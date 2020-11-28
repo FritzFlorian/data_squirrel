@@ -167,6 +167,10 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         Ok(context.finish())
     }
 
+    pub fn root_path(&self) -> PathBuf {
+        self.root_path.clone()
+    }
+
     pub fn metadata_db_path(&self) -> PathBuf {
         match self.fs.db_access_type() {
             virtual_fs::DBAccessType::InPlace => {
@@ -175,6 +179,11 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             virtual_fs::DBAccessType::InMemory => PathBuf::from(":memory:"),
             virtual_fs::DBAccessType::TmpCopy => panic!("Not implemented!"),
         }
+    }
+
+    pub fn metadata(&self, relative_path: &Path) -> Result<virtual_fs::Metadata> {
+        let result = self.fs.metadata(&self.root_path.join(&relative_path))?;
+        Ok(result)
     }
 
     fn load_metadata(&self, data_item: &mut DataItem, dir_entry: &virtual_fs::DirEntry) {
