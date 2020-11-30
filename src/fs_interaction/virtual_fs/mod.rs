@@ -17,6 +17,7 @@ pub trait FS: Clone {
     fn metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata>;
 
     fn create_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>>;
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;

@@ -98,7 +98,7 @@ impl MetadataDB {
         Ok(result)
     }
 
-    pub fn create_data_store(&self, new_store: &DataStore) -> Result<DataStore> {
+    pub fn create_data_store(&self, new_store: &data_store::InsertFull) -> Result<DataStore> {
         use self::schema::data_stores::dsl::*;
         use diesel::dsl::*;
 
@@ -147,7 +147,7 @@ impl MetadataDB {
         let join =
             data_items::table.inner_join(owner_informations::table.inner_join(metadatas::table));
         let filtered = join
-            .filter(data_items::path.like(path))
+            .filter(data_items::path.eq(path)) // ignores case because of table definition
             .filter(owner_informations::data_store_id.eq(for_data_store.id));
 
         let result = filtered
@@ -160,15 +160,75 @@ impl MetadataDB {
         }
     }
 
-    pub fn create_local_data_item(&self, path: &str) -> Result<(DataItem, Metadata)> {
-        let local_data_store = self.get_this_data_store()?;
+    pub fn create_local_data_item(
+        &self,
+        path: &str,
+        creation_time: chrono::NaiveDateTime,
+        mod_time: chrono::NaiveDateTime,
+        is_file: bool,
+        hash: &str,
+    ) -> Result<(DataItem, Metadata)> {
+        use self::schema::data_items;
+        use self::schema::metadatas;
+        use self::schema::owner_informations;
 
-        // TODO: Insert new data_item.
+        let local_data_store = self.get_this_data_store()?;
+        self.increase_local_version()?; // We make use of the current data_store version
+
+        // Insert new data_item and associated owner information.
+        diesel::insert_into(data_items::table)
+            .values(data_item::InsertFull {
+                creator_store_id: local_data_store.id,
+                creator_version: local_data_store.version,
+
+                parent_item_id: None, // TODO: search parent item and assign it
+
+                path: path.to_string(),
+                is_file: is_file,
+            })
+            .execute(&self.conn)?;
+        let new_data_item = data_items::table
+            .filter(data_items::path.eq(&path))
+            .first::<DataItem>(&self.conn)?;
+
+        diesel::insert_into(owner_informations::table)
+            .values(owner_information::InsertFull {
+                data_item_id: new_data_item.id,
+                data_store_id: local_data_store.id,
+            })
+            .execute(&self.conn)?;
+        let new_owner_info = owner_informations::table
+            .filter(owner_informations::data_item_id.eq(new_data_item.id))
+            .filter(owner_informations::data_store_id.eq(local_data_store.id))
+            .first::<OwnerInformation>(&self.conn)?;
+
         // TODO: Set new data_item's mod time (read local DB version and bump it).
         // TODO: Update chain of parent data items (mod times set to MAX with new mod time).
-        // TODO: Insert metadata item.
+
+        // Insert metadata item.
+        diesel::insert_into(metadatas::table)
+            .values(metadata::InsertFull {
+                owner_information_id: new_owner_info.id,
+
+                creation_time: creation_time,
+                mod_time: mod_time,
+
+                hash: hash.to_string(),
+            })
+            .execute(&self.conn)?;
 
         Ok(self.get_data_item(&local_data_store, &path)?.unwrap())
+    }
+
+    fn increase_local_version(&self) -> Result<()> {
+        use self::schema::data_stores;
+
+        diesel::update(data_stores::table)
+            .filter(data_stores::is_this_store.eq(true))
+            .set(data_stores::version.eq(data_stores::version + 1))
+            .execute(&self.conn)?;
+
+        Ok(())
     }
 
     pub fn modify_local_data_item(&self) -> Result<()> {
@@ -191,6 +251,7 @@ impl MetadataDB {
 
     fn default_db_settings(&self) -> Result<()> {
         sql_query("PRAGMA locking_mode = exclusive").execute(&self.conn)?;
+        sql_query("PRAGMA journal_mode=WAL").execute(&self.conn)?;
         sql_query("PRAGMA foreign_keys = 1").execute(&self.conn)?;
 
         Ok(())

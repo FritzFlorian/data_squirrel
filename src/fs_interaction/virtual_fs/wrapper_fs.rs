@@ -33,6 +33,9 @@ impl FS for WrapperFS {
     fn create_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         fs::DirBuilder::new().recursive(false).create(&path)
     }
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        fs::remove_dir(path)
+    }
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>> {
         let result: Result<Vec<_>, _> = fs::read_dir(path)?
             .map(|entry| entry.map(|entry| DirEntry { path: entry.path() }))

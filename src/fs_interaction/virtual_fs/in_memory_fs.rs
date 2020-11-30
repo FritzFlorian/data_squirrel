@@ -137,6 +137,17 @@ impl FS for InMemoryFS {
 
         Ok(())
     }
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let path = self.canonicalize(path)?;
+
+        if self.is_root(&path) || self.children_exist(&path) {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        } else if self.items.borrow_mut().deref_mut().remove(&path).is_some() {
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>> {
         let path = self.canonicalize(path)?;
 

@@ -67,7 +67,7 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
 
                 parent_item_id      INTEGER,
 
-                path                TEXT NOT NULL,
+                path                TEXT NOT NULL COLLATE NOCASE,
                 is_file             INTEGER NOT NULL, 
 
                 UNIQUE(creator_store_id, creator_version),

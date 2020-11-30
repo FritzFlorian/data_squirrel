@@ -3,7 +3,8 @@ use crate::fs_interaction::virtual_fs;
 use crate::fs_interaction::FSInteraction;
 use crate::metadata_db;
 use crate::metadata_db::MetadataDB;
-use crate::version_vector;
+use chrono::NaiveDateTime;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -81,8 +82,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // Create an entry for our local data_store. Others might be added when interacting with
         // different disks to gain knowledge of them.
         let unique_id = uuid::Uuid::new_v4();
-        metadata_db.create_data_store(&metadata_db::DataStore {
-            id: 0,
+        metadata_db.create_data_store(&metadata_db::data_store::InsertFull {
             data_set_id: data_set.id,
             unique_name: format!("{:}-{:}", data_store_name, unique_id),
             human_name: data_store_name.to_string(),
@@ -106,83 +106,164 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         self.perform_scan(&root_path, &root_metadata)
     }
 
-    fn perform_scan(
+    fn fs_to_date_time(fs_time: &filetime::FileTime) -> NaiveDateTime {
+        NaiveDateTime::from_timestamp(fs_time.unix_seconds(), fs_time.nanoseconds())
+    }
+
+    fn index_dir(
         &self,
         path: &Path,
-        path_metadata: &virtual_fs::Metadata,
+        metadata: &virtual_fs::Metadata,
+        data_store: &metadata_db::DataStore,
     ) -> Result<ScanResult> {
-        let mut scan_result = ScanResult::new();
-        let data_store = self.db_access.get_this_data_store()?;
+        let mut result = ScanResult::new();
+        result.indexed_items += 1;
 
         let dir_db_entry = self
             .db_access
             .get_data_item(&data_store, path.to_str().unwrap())?;
-        let dir_dib_entry = if let Some(entry) = dir_db_entry {
-            entry
-        } else {
-            // TODO: pass all required properties...
-            scan_result.new_items += 1;
-            self.db_access
-                .create_local_data_item(path.to_str().unwrap())?
-        };
 
-        let items = self.fs_access.index(path)?;
+        if let Some((_db_item, _db_metadata)) = dir_db_entry {
+            // TODO: Check if we find metadata changes and apply them.
+            //       An open question is if we handle this as a change or not.
+            // TODO: Optionally also see if the path changed in upper/lower cases and note it.
+        } else {
+            result.new_items += 1;
+
+            self.db_access.create_local_data_item(
+                path.to_str().unwrap(),
+                Self::fs_to_date_time(&metadata.creation_time()),
+                Self::fs_to_date_time(&metadata.last_mod_time()),
+                false,
+                "",
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    fn index_file(
+        &self,
+        path: &Path,
+        metadata: &virtual_fs::Metadata,
+        data_store: &metadata_db::DataStore,
+        detect_bitrot: bool,
+    ) -> Result<ScanResult> {
+        let mut result = ScanResult::new();
+        result.indexed_items += 1;
+
+        let item_db_entry = self
+            .db_access
+            .get_data_item(&data_store, path.to_str().unwrap())?;
+
+        if let Some((_db_item, db_metadata)) = item_db_entry {
+            // TODO: Inspect more changes in metadata.
+            //       Decide how we handle them, e.g. is a permission change or a change in
+            //       file creating time note-worthy? If so, do we simply record it as a local change
+            //       to our DB's metadata or do we take not of it as 'this file changed'?.
+            // TODO: Detect a rather 'big' change: What is now a file was a directory before!!!
+            if Self::fs_to_date_time(&metadata.last_mod_time()) != db_metadata.mod_time {
+                use data_encoding::HEXUPPER;
+                let hash = self.fs_access.calculate_hash(&path)?;
+                let hash = HEXUPPER.encode(hash.as_ref());
+
+                if db_metadata.hash != hash {
+                    result.changed_items += 1;
+
+                    // record update in modification version vector
+                    // TODO: pass all required information for the update.
+                    self.db_access.modify_local_data_item()?;
+                } else {
+                    // TODO: handle cases where ONLY metadata changes.
+                    //       Closely related to the above question which metadata changes
+                    //       are noteworthy as a 'this file changed' event.
+                }
+            } else if detect_bitrot {
+                use data_encoding::HEXUPPER;
+                let hash = self.fs_access.calculate_hash(&path)?;
+                let hash = HEXUPPER.encode(hash.as_ref());
+
+                if db_metadata.hash != hash {
+                    // TODO: properly handle this by returning errors. Maybe re-trying to hash
+                    //       the file in case this was simply a read issue.
+                    panic!("Bitrot detected!")
+                }
+            }
+        } else {
+            // We have no local entry for the target file in our DB, register it as a new file.
+            result.new_items += 1;
+
+            use data_encoding::HEXUPPER;
+            let hash = self.fs_access.calculate_hash(&path)?;
+            let hash = HEXUPPER.encode(hash.as_ref());
+
+            self.db_access.create_local_data_item(
+                &path.to_str().unwrap(),
+                Self::fs_to_date_time(&metadata.creation_time()),
+                Self::fs_to_date_time(&metadata.last_mod_time()),
+                true,
+                &hash,
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    fn perform_scan(
+        &self,
+        dir_path: &Path,
+        dir_metadata: &virtual_fs::Metadata,
+    ) -> Result<ScanResult> {
+        // We keep track of 'scan events' to have a rough output on a run of the scan function.
+        let mut scan_result = ScanResult::new();
+        let data_store = self.db_access.get_this_data_store()?;
+
+        // Index the currently scanned dir (e.g. add it to the DB if it does not exist).
+        scan_result =
+            scan_result.combine(&self.index_dir(&dir_path, &dir_metadata, &data_store)?);
+
+        // Next, we index each file present on disk in this directory.
+        // This is the 'positive' part of the scan operation, i.e. we add anything that is on
+        // disk and not in the DB, as well as anything that has changed on dis.
+        let items = self.fs_access.index(dir_path)?;
+        let mut item_names = HashSet::with_capacity(items.len());
         for item in &items {
-            scan_result.indexed_items += 1;
+            item_names.insert(item.relative_path.clone());
+
             if item.issues.is_empty() {
                 let item_metadata = item.metadata.as_ref().unwrap();
                 match item_metadata.file_type() {
                     virtual_fs::FileType::File => {
-                        println!("Indexing File {:?}...", item.relative_path);
-                        let item_db_entry = self
-                            .db_access
-                            .get_data_item(&data_store, path.to_str().unwrap())?;
-                        if let Some((data_item, metadata)) = item_db_entry {
-                            // if metadata differs
-                            {
-                                scan_result.changed_items += 1;
-                                let hash = self.fs_access.calculate_hash(&item.relative_path)?;
-                                use data_encoding::HEXUPPER;
-                                println!("Hash: {:}", HEXUPPER.encode(hash.as_ref()));
-                                // if hash differs
-                                {
-                                    // record update in modification version vector
-                                    // TODO: pass all required information for the update.
-                                    self.db_access.modify_local_data_item()?;
-                                }
-                                // TODO: handle cases where ONLY metadata changes
-                            }
-                            // else optional bit-rot detection hash calculation
-                            {
-                                // TODO: calculate file hash and possibly report issue.
-                            }
-                        } else {
-                            scan_result.new_items += 1;
-                            let hash = self.fs_access.calculate_hash(&item.relative_path)?;
-                            use data_encoding::HEXUPPER;
-                            println!("Hash: {:}", HEXUPPER.encode(hash.as_ref()));
-                            // TODO: pass all required arguments
-                            self.db_access
-                                .create_local_data_item(&item.relative_path.to_str().unwrap())?;
-                        }
+                        let file_scan_result = self.index_file(
+                            &item.relative_path,
+                            &item_metadata,
+                            &data_store,
+                            false,
+                        )?;
+                        scan_result = scan_result.combine(&file_scan_result);
                     }
                     virtual_fs::FileType::Link => {
-                        println!("Skipping Link {:?}...", item.relative_path);
+                        // Todo: Properly collect un-handled links to the caller.
+                        eprintln!("Skipping Link {:?}...", item.relative_path);
                     }
                     virtual_fs::FileType::Dir => {
-                        println!("Indexing Directory {:?}...", item.relative_path);
-                        self.perform_scan(&item.relative_path, item_metadata)?;
+                        let sub_dir_result =
+                            self.perform_scan(&item.relative_path, item_metadata)?;
+                        scan_result = scan_result.combine(&sub_dir_result);
                     }
                 }
             } else {
-                // TODO: Properly collect issues and report them to the caller instead of
-                //       handling them in place. This will allow menu/user driven repairs.
+                // TODO: Properly collect issues and report them to the caller.
                 eprintln!(
                     "Issues with data item {:?}: {:?}",
                     item.relative_path, item.issues
                 );
             }
         }
+
+        // Lastly we perform the 'negative' operation of the scan process:
+        // We load all known entries of the directory and see if there are any that are
+        // no longer present on disk, thus signaling a deletion.
         scan_result.deleted_items += 0;
         // TODO: Look at all items that are in DB but no longer present in folder.
         //       We need to delete them and recursively delete their child entries.
@@ -206,24 +287,39 @@ impl ScanResult {
             deleted_items: 0,
         }
     }
+
+    pub fn combine(&self, other: &Self) -> Self {
+        Self {
+            indexed_items: self.indexed_items + other.indexed_items,
+            changed_items: self.changed_items + other.changed_items,
+            new_items: self.new_items + other.new_items,
+            deleted_items: self.deleted_items + other.deleted_items,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use fs_interaction::virtual_fs::FS;
-    use std::fs;
-    use std::io::Write;
 
     #[test]
     fn create_data_store() {
         let test_dir = tempfile::tempdir().unwrap();
+        let data_store =
+            DefaultDataStore::create(test_dir.path(), "XYZ-123", "XYZ", "local-data-store")
+                .unwrap();
 
-        DefaultDataStore::create(test_dir.path(), "XYZ", "XYZ", "local-data-store").unwrap();
+        let data_set = data_store.db_access.get_data_set().unwrap();
+        assert_eq!(data_set.unique_name, "XYZ-123");
+        assert_eq!(data_set.human_name, "XYZ");
 
-        // TODO: Some tests to see if DB entries are created as intended.
-        //       We will add them when we have more of the data_store interface, i.e.
-        //       when there is the required interaction between two data_store instances.
+        let this_data_store = data_store.db_access.get_this_data_store().unwrap();
+        assert_eq!(
+            this_data_store.path_on_device,
+            test_dir.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(this_data_store.human_name, "local-data-store");
     }
 
     #[test]
@@ -250,18 +346,18 @@ mod tests {
     #[test]
     fn scan_data_store_directory() {
         let in_memory_fs = virtual_fs::InMemoryFS::new();
-
-        in_memory_fs.create_dir("sub-1").unwrap();
-        in_memory_fs.create_dir("sub-1/sub-1-1").unwrap();
-        in_memory_fs.create_dir("sub-2").unwrap();
-
-        in_memory_fs.create_file("file-1").unwrap();
-        in_memory_fs.create_file("file-2").unwrap();
-        in_memory_fs.create_file("sub-1/file-1").unwrap();
-
         let data_store_1 =
             DataStore::create_with_fs("", "XYZ", "XYZ", "local-data-store", in_memory_fs.clone())
                 .unwrap();
+
+        // Initial data set
+        in_memory_fs.create_dir("sUb-1").unwrap();
+        in_memory_fs.create_dir("sUb-1/sub-1-1").unwrap();
+        in_memory_fs.create_dir("sUb-2").unwrap();
+
+        in_memory_fs.create_file("file-1").unwrap();
+        in_memory_fs.create_file("file-2").unwrap();
+        in_memory_fs.create_file("sUb-1/file-1").unwrap();
 
         let changes = data_store_1.perform_full_scan().unwrap();
         assert_eq!(
@@ -274,6 +370,39 @@ mod tests {
             }
         );
 
-        // TODO: simulate changes and see if the re-scans pick them up correctly.
+        // Detect new and changed files
+        in_memory_fs.create_file("file-3").unwrap();
+        in_memory_fs
+            .test_set_file_content("file-1", Vec::from("hello"))
+            .unwrap();
+        in_memory_fs.test_increase_file_mod_time("file-1").unwrap();
+
+        let changes = data_store_1.perform_full_scan().unwrap();
+        assert_eq!(
+            changes,
+            ScanResult {
+                indexed_items: 8,
+                changed_items: 1,
+                new_items: 1,
+                deleted_items: 0
+            }
+        );
+
+        // Detect deleted files and directories
+        in_memory_fs.remove_file("file-1").unwrap();
+        in_memory_fs.remove_file("sUb-1/file-1").unwrap();
+        in_memory_fs.remove_dir("sUb-1/sub-2").unwrap();
+        in_memory_fs.remove_dir("sUb-1").unwrap();
+
+        let changes = data_store_1.perform_full_scan().unwrap();
+        assert_eq!(
+            changes,
+            ScanResult {
+                indexed_items: 4,
+                changed_items: 0,
+                new_items: 0,
+                deleted_items: 4
+            }
+        );
     }
 }
