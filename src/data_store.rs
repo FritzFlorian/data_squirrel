@@ -99,6 +99,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         })
     }
 
+    pub fn local_version(&self) -> Result<i64> {
+        Ok(self.db_access.get_this_data_store()?.version)
+    }
+
     pub fn perform_full_scan(&self) -> Result<ScanResult> {
         let root_path = PathBuf::from("");
         let root_metadata = self.fs_access.metadata(&root_path)?;
@@ -156,12 +160,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .db_access
             .get_data_item(&data_store, path.to_str().unwrap())?;
 
-        if let Some((_db_item, _db_owner, db_metadata)) = item_db_entry {
+        if let Some((_db_item, db_owner, db_metadata)) = item_db_entry {
             // TODO: Inspect more changes in metadata.
             //       Decide how we handle them, e.g. is a permission change or a change in
             //       file creating time note-worthy? If so, do we simply record it as a local change
             //       to our DB's metadata or do we take not of it as 'this file changed'?.
             // TODO: Detect a rather 'big' change: What is now a file was a directory before!!!
+            //       Currently we think this would be best handled by deleting the entry and then
+            //       re-adding it.
             if Self::fs_to_date_time(&metadata.last_mod_time()) != db_metadata.mod_time {
                 use data_encoding::HEXUPPER;
                 let hash = self.fs_access.calculate_hash(&path)?;
@@ -170,9 +176,13 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 if db_metadata.hash != hash {
                     result.changed_items += 1;
 
-                    // record update in modification version vector
-                    // TODO: pass all required information for the update.
-                    self.db_access.modify_local_data_item()?;
+                    self.db_access.modify_local_data_item(
+                        &db_owner,
+                        &db_metadata,
+                        &Self::fs_to_date_time(&metadata.creation_time()),
+                        &Self::fs_to_date_time(&metadata.last_mod_time()),
+                        &hash,
+                    )?;
                 } else {
                     // TODO: handle cases where ONLY metadata changes.
                     //       Closely related to the above question which metadata changes
@@ -369,6 +379,7 @@ mod tests {
                 deleted_items: 0
             }
         );
+        assert_eq!(data_store_1.local_version().unwrap(), 7);
 
         // Detect new and changed files
         in_memory_fs.create_file("file-3").unwrap();
@@ -387,6 +398,7 @@ mod tests {
                 deleted_items: 0
             }
         );
+        assert_eq!(data_store_1.local_version().unwrap(), 9);
 
         // Detect deleted files and directories
         in_memory_fs.remove_file("file-1").unwrap();
@@ -404,5 +416,6 @@ mod tests {
                 deleted_items: 4
             }
         );
+        assert_eq!(data_store_1.local_version().unwrap(), 9);
     }
 }

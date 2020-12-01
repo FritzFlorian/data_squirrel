@@ -18,6 +18,7 @@ pub use self::mod_time::ModTime;
 use std::error::Error;
 use std::fmt;
 
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sqlite::SqliteConnection;
@@ -194,79 +195,120 @@ impl MetadataDB {
         use self::schema::owner_informations;
 
         let path_string = path.to_str().unwrap().to_string();
+        let result = self.conn.transaction::<_, MetadataDBError, _>(|| {
+            // We insert an item, bump the data stores version and mark all events with the version.
+            let local_data_store = self.get_this_data_store()?;
+            let new_version = local_data_store.version;
+            self.increase_local_version()?;
 
-        // We insert an item, bump the data stores version and mark all events with the version.
-        let local_data_store = self.get_this_data_store()?;
-        let new_version = local_data_store.version;
-        self.increase_local_version()?;
+            // Look if the data_item has a parent and make sure we associate them with each other.
+            let parent_item: Option<DataItem> = if let Some(parent_path) = path.parent() {
+                // Deeper nested sup-directory, e.g. sub/dir/nested/ has parent sub/dir/
+                Some(
+                    data_items::table
+                        .filter(data_items::path.eq(parent_path.to_str().unwrap()))
+                        .first::<DataItem>(&self.conn)?,
+                )
+            } else if path_string.is_empty() {
+                // Root directory has no parent directory
+                None
+            } else {
+                // Special case of a top level direcotry, as its parent is root and not apparent in
+                // the path's representation (i.e. rust will tell us that sub/ has no parent).
+                Some(
+                    data_items::table
+                        .filter(data_items::path.eq(""))
+                        .first::<DataItem>(&self.conn)?,
+                )
+            };
 
-        // Look if the data_item has a parent and make sure we associate them with each other.
-        let parent_item: Option<DataItem> = if let Some(parent_path) = path.parent() {
-            // Deeper nested sup-directory, e.g. sub/dir/nested/ has parent sub/dir/
-            Some(
-                data_items::table
-                    .filter(data_items::path.eq(parent_path.to_str().unwrap()))
-                    .first::<DataItem>(&self.conn)?,
-            )
-        } else if path_string.is_empty() {
-            // Root directory has no parent directory
-            None
-        } else {
-            // Special case of a top level direcotry, as its parent is root and not apparent in
-            // the path's representation (i.e. rust will tell us that sub/ has no parent).
-            Some(
-                data_items::table
-                    .filter(data_items::path.eq(""))
-                    .first::<DataItem>(&self.conn)?,
-            )
-        };
+            // Insert new data_item and associated owner information.
+            diesel::insert_into(data_items::table)
+                .values(data_item::InsertFull {
+                    creator_store_id: local_data_store.id,
+                    creator_version: new_version,
 
-        // Insert new data_item and associated owner information.
-        diesel::insert_into(data_items::table)
-            .values(data_item::InsertFull {
-                creator_store_id: local_data_store.id,
-                creator_version: new_version,
+                    parent_item_id: parent_item.map_or(None, |item| Some(item.id)),
 
-                parent_item_id: parent_item.map_or(None, |item| Some(item.id)),
+                    path: &path_string,
+                    is_file: is_file,
+                })
+                .execute(&self.conn)?;
+            let new_data_item = data_items::table
+                .filter(data_items::path.eq(&path_string))
+                .first::<DataItem>(&self.conn)?;
 
-                path: &path_string,
-                is_file: is_file,
-            })
-            .execute(&self.conn)?;
-        let new_data_item = data_items::table
-            .filter(data_items::path.eq(&path_string))
-            .first::<DataItem>(&self.conn)?;
+            diesel::insert_into(owner_informations::table)
+                .values(owner_information::InsertFull {
+                    data_item_id: new_data_item.id,
+                    data_store_id: local_data_store.id,
+                })
+                .execute(&self.conn)?;
+            let new_owner_info = owner_informations::table
+                .filter(owner_informations::data_item_id.eq(new_data_item.id))
+                .filter(owner_informations::data_store_id.eq(local_data_store.id))
+                .first::<OwnerInformation>(&self.conn)?;
 
-        diesel::insert_into(owner_informations::table)
-            .values(owner_information::InsertFull {
-                data_item_id: new_data_item.id,
-                data_store_id: local_data_store.id,
-            })
-            .execute(&self.conn)?;
-        let new_owner_info = owner_informations::table
-            .filter(owner_informations::data_item_id.eq(new_data_item.id))
-            .filter(owner_informations::data_store_id.eq(local_data_store.id))
-            .first::<OwnerInformation>(&self.conn)?;
+            // Also update the new item's modification time to match its creation time.
+            // This gives the item a 'proper' modification event to be used in later comparisons.
+            self.add_mod_event(&new_owner_info, &local_data_store, new_version)?;
 
-        // Also update the new item's modification time to match its creation time.
-        // This gives the item a 'proper' modification event to be used in later comparisons.
-        self.add_mod_event(&new_owner_info, &local_data_store, new_version)?;
+            // Insert metadata item.
+            diesel::insert_into(metadatas::table)
+                .values(metadata::InsertFull {
+                    owner_information_id: new_owner_info.id,
 
-        // Insert metadata item.
-        diesel::insert_into(metadatas::table)
-            .values(metadata::InsertFull {
-                owner_information_id: new_owner_info.id,
+                    creation_time: creation_time,
+                    mod_time: mod_time,
 
-                creation_time: creation_time,
-                mod_time: mod_time,
+                    hash: hash.to_string(),
+                })
+                .execute(&self.conn)?;
 
-                hash: hash.to_string(),
-            })
-            .execute(&self.conn)?;
+            Ok(self
+                .get_data_item(&local_data_store, path.to_str().unwrap())?
+                .unwrap())
+        })?;
 
-        Ok(self
-            .get_data_item(&local_data_store, path.to_str().unwrap())?
-            .unwrap())
+        Ok(result)
+    }
+
+    /// Notify the DB about an changed/modified data_item.
+    /// This updates the specified metadata as well as bumping the modification time of the item.
+    pub fn modify_local_data_item(
+        &self,
+        owner_information: &OwnerInformation,
+        old_metadata: &Metadata,
+        creation_time: &NaiveDateTime,
+        mod_time: &NaiveDateTime,
+        hash: &str,
+    ) -> Result<()> {
+        use self::schema::metadatas;
+
+        self.conn.transaction::<_, MetadataDBError, _>(|| {
+            // We insert an item, bump the data stores version and mark all events with the version.
+            let local_data_store = self.get_this_data_store()?;
+            let new_version = local_data_store.version;
+            self.increase_local_version()?;
+
+            self.add_mod_event(&owner_information, &local_data_store, new_version)?;
+
+            diesel::update(metadatas::table.find(old_metadata.id))
+                .set(metadata::UpdateMetadata {
+                    creation_time: &creation_time,
+                    mod_time: &mod_time,
+                    hash: &hash,
+                })
+                .execute(&self.conn)?;
+
+            Ok(())
+        })?;
+        // TODO: Find data_item.
+        // TODO: Set data_item's mod time (read local DB version and bump it).
+        // TODO: Update chain of parent data items (mod times set to MAX with new mod time).
+        // TODO: Update data_item's metadata entry.
+
+        Ok(())
     }
 
     /// Updates the modification time of the given item (via its owner information) to
@@ -389,17 +431,6 @@ impl MetadataDB {
             .filter(data_stores::is_this_store.eq(true))
             .set(data_stores::version.eq(data_stores::version + 1))
             .execute(&self.conn)?;
-
-        Ok(())
-    }
-
-    pub fn modify_local_data_item(&self) -> Result<()> {
-        let _local_data_store = self.get_this_data_store()?;
-
-        // TODO: Find data_item.
-        // TODO: Set data_item's mod time (read local DB version and bump it).
-        // TODO: Update chain of parent data items (mod times set to MAX with new mod time).
-        // TODO: Update data_item's metadata entry.
 
         Ok(())
     }

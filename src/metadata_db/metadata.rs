@@ -22,3 +22,12 @@ pub struct InsertFull {
 
     pub hash: String,
 }
+
+#[derive(AsChangeset)]
+#[table_name = "metadatas"]
+pub struct UpdateMetadata<'a> {
+    pub creation_time: &'a chrono::NaiveDateTime,
+    pub mod_time: &'a chrono::NaiveDateTime,
+
+    pub hash: &'a str,
+}
