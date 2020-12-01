@@ -84,12 +84,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let unique_id = uuid::Uuid::new_v4();
         metadata_db.create_data_store(&metadata_db::data_store::InsertFull {
             data_set_id: data_set.id,
-            unique_name: format!("{:}-{:}", data_store_name, unique_id),
-            human_name: data_store_name.to_string(),
-            creation_date: chrono::Utc::now().naive_local(),
+            unique_name: &format!("{:}-{:}", data_store_name, unique_id),
+            human_name: data_store_name,
+            creation_date: &chrono::Utc::now().naive_local(),
             is_this_store: true,
-            path_on_device: fs_interaction.root_path().to_str().unwrap().to_string(),
-            location_note: String::new(),
+            path_on_device: fs_interaction.root_path().to_str().unwrap(),
+            location_note: "",
             version: 0,
         })?;
 
@@ -123,7 +123,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .db_access
             .get_data_item(&data_store, path.to_str().unwrap())?;
 
-        if let Some((_db_item, _db_metadata)) = dir_db_entry {
+        if let Some((_db_item, _db_owner, _db_metadata)) = dir_db_entry {
             // TODO: Check if we find metadata changes and apply them.
             //       An open question is if we handle this as a change or not.
             // TODO: Optionally also see if the path changed in upper/lower cases and note it.
@@ -131,7 +131,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             result.new_items += 1;
 
             self.db_access.create_local_data_item(
-                path.to_str().unwrap(),
+                &path,
                 Self::fs_to_date_time(&metadata.creation_time()),
                 Self::fs_to_date_time(&metadata.last_mod_time()),
                 false,
@@ -156,7 +156,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .db_access
             .get_data_item(&data_store, path.to_str().unwrap())?;
 
-        if let Some((_db_item, db_metadata)) = item_db_entry {
+        if let Some((_db_item, _db_owner, db_metadata)) = item_db_entry {
             // TODO: Inspect more changes in metadata.
             //       Decide how we handle them, e.g. is a permission change or a change in
             //       file creating time note-worthy? If so, do we simply record it as a local change
@@ -198,7 +198,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             let hash = HEXUPPER.encode(hash.as_ref());
 
             self.db_access.create_local_data_item(
-                &path.to_str().unwrap(),
+                &path,
                 Self::fs_to_date_time(&metadata.creation_time()),
                 Self::fs_to_date_time(&metadata.last_mod_time()),
                 true,
@@ -391,7 +391,7 @@ mod tests {
         // Detect deleted files and directories
         in_memory_fs.remove_file("file-1").unwrap();
         in_memory_fs.remove_file("sUb-1/file-1").unwrap();
-        in_memory_fs.remove_dir("sUb-1/sub-2").unwrap();
+        in_memory_fs.remove_dir("sUb-1/sub-1-1").unwrap();
         in_memory_fs.remove_dir("sUb-1").unwrap();
 
         let changes = data_store_1.perform_full_scan().unwrap();
