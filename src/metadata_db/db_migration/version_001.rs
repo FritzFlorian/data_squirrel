@@ -4,8 +4,8 @@ pub fn migrate(conn: &SqliteConnection) -> Result<()> {
     create_table_data_sets(&conn)?;
     create_table_data_stores(&conn)?;
     create_table_data_items(&conn)?;
-    create_table_metadatas(&conn)?;
     create_table_owner_informations(&conn)?;
+    create_table_metadatas(&conn)?;
     create_table_mod_times(&conn)?;
     create_table_sync_times(&conn)?;
 
@@ -41,8 +41,9 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
                 creation_date       TEXT NOT NULL,
                 path_on_device      TEXT NOT NULL,
                 location_note       TEXT NOT NULL DEFAULT '',
+
                 is_this_store       INTEGER NOT NULL,
-                version             INTEGER NOT NULL,
+                time                INTEGER NOT NULL,
 
                 FOREIGN KEY(data_set_id)    REFERENCES data_sets(id)
              )",
@@ -61,41 +62,13 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
     sql_query(
         "CREATE TABLE data_items(
                 id                  INTEGER PRIMARY KEY NOT NULL,
+                data_set_id         INTEGER NOT NULL,
                 
-                creator_store_id    INTEGER NOT NULL,
-                creator_version     INTEGER NOT NULL,
-
                 parent_item_id      INTEGER,
-
                 path                TEXT NOT NULL COLLATE NOCASE,
-                is_file             INTEGER NOT NULL, 
 
-                UNIQUE(creator_store_id, creator_version),
-                FOREIGN KEY(creator_store_id)   REFERENCES data_stores(id),
+                FOREIGN KEY(data_set_id)   REFERENCES data_sets(id),
                 FOREIGN KEY(parent_item_id)     REFERENCES data_items(id)
-            )",
-    )
-    .execute(conn)?;
-
-    Ok(())
-}
-
-// Metadata associated to a data item from the view of a specific data store.
-// Usually, we will only keep information on our local data_store, as this is required for
-// detecting local updates. However, in some use cases we might want to communicate other
-// metadata, thus also keep it.
-fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
-    sql_query(
-        "CREATE TABLE metadatas(
-                id                      INTEGER PRIMARY KEY NOT NULL,
-
-                owner_information_id    INTEGER NOT NULL,
-
-                creation_time           TEXT NOT NULL,
-                mod_time                TEXT NOT NULL,
-                hash                    TEXT NOT NULL,
-    
-                FOREIGN KEY(owner_information_id)      REFERENCES owner_informations(id)
             )",
     )
     .execute(conn)?;
@@ -127,6 +100,33 @@ fn create_table_owner_informations(conn: &SqliteConnection) -> Result<()> {
                 UNIQUE(data_store_id, data_item_id),
                 FOREIGN KEY(data_store_id)      REFERENCES data_stores(id),
                 FOREIGN KEY(data_item_id)       REFERENCES data_items(id)
+            )",
+    )
+    .execute(conn)?;
+
+    Ok(())
+}
+
+// Metadata associated to a data item from the view of a specific data store.
+// Usually, we will only keep information on our local data_store, as this is required for
+// detecting local updates. However, in some use cases we might want to communicate other
+// metadata, thus also keep it.
+fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE metadatas(
+                id                      INTEGER PRIMARY KEY NOT NULL,
+                owner_information_id    INTEGER NOT NULL,
+                
+                creator_store_id    INTEGER NOT NULL,
+                creator_store_time        INTEGER NOT NULL,
+
+                is_file                 INTEGER NOT NULL, 
+                creation_time           TEXT NOT NULL,
+                mod_time                TEXT NOT NULL,
+                hash                    TEXT NOT NULL,
+    
+                UNIQUE(owner_information_id, creator_store_id, creator_store_time),
+                FOREIGN KEY(owner_information_id)      REFERENCES owner_informations(id)
             )",
     )
     .execute(conn)?;

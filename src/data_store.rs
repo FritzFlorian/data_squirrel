@@ -90,7 +90,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             is_this_store: true,
             path_on_device: fs_interaction.root_path().to_str().unwrap(),
             location_note: "",
-            version: 0,
+            time: 0,
         })?;
 
         Ok(Self {
@@ -100,7 +100,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     }
 
     pub fn local_version(&self) -> Result<i64> {
-        Ok(self.db_access.get_this_data_store()?.version)
+        Ok(self.db_access.get_this_data_store()?.time)
     }
 
     pub fn perform_full_scan(&self) -> Result<ScanResult> {
@@ -119,7 +119,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         path: &Path,
         metadata: &virtual_fs::Metadata,
         data_store: &metadata_db::DataStore,
-    ) -> Result<ScanResult> {
+    ) -> Result<(ScanResult, metadata_db::Item)> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
@@ -127,10 +127,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .db_access
             .get_data_item(&data_store, path.to_str().unwrap())?;
 
-        if let Some((_db_item, _db_owner, _db_metadata)) = dir_db_entry {
+        let db_item = if let Some(db_item) = dir_db_entry {
             // TODO: Check if we find metadata changes and apply them.
             //       An open question is if we handle this as a change or not.
             // TODO: Optionally also see if the path changed in upper/lower cases and note it.
+
+            db_item
         } else {
             result.new_items += 1;
 
@@ -140,10 +142,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 Self::fs_to_date_time(&metadata.last_mod_time()),
                 false,
                 "",
-            )?;
-        }
+            )?
+        };
 
-        Ok(result)
+        Ok((result, db_item))
     }
 
     fn index_file(
@@ -152,7 +154,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         metadata: &virtual_fs::Metadata,
         data_store: &metadata_db::DataStore,
         detect_bitrot: bool,
-    ) -> Result<ScanResult> {
+    ) -> Result<(ScanResult, metadata_db::Item)> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
@@ -160,7 +162,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .db_access
             .get_data_item(&data_store, path.to_str().unwrap())?;
 
-        if let Some((_db_item, db_owner, db_metadata)) = item_db_entry {
+        let db_item = if let Some(db_item) = item_db_entry {
             // TODO: Inspect more changes in metadata.
             //       Decide how we handle them, e.g. is a permission change or a change in
             //       file creating time note-worthy? If so, do we simply record it as a local change
@@ -168,17 +170,16 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             // TODO: Detect a rather 'big' change: What is now a file was a directory before!!!
             //       Currently we think this would be best handled by deleting the entry and then
             //       re-adding it.
-            if Self::fs_to_date_time(&metadata.last_mod_time()) != db_metadata.mod_time {
+            if Self::fs_to_date_time(&metadata.last_mod_time()) != db_item.mod_time() {
                 use data_encoding::HEXUPPER;
                 let hash = self.fs_access.calculate_hash(&path)?;
                 let hash = HEXUPPER.encode(hash.as_ref());
 
-                if db_metadata.hash != hash {
+                if db_item.hash() != hash {
                     result.changed_items += 1;
 
                     self.db_access.modify_local_data_item(
-                        &db_owner,
-                        &db_metadata,
+                        &db_item,
                         &Self::fs_to_date_time(&metadata.creation_time()),
                         &Self::fs_to_date_time(&metadata.last_mod_time()),
                         &hash,
@@ -193,12 +194,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 let hash = self.fs_access.calculate_hash(&path)?;
                 let hash = HEXUPPER.encode(hash.as_ref());
 
-                if db_metadata.hash != hash {
+                if db_item.hash() != hash {
                     // TODO: properly handle this by returning errors. Maybe re-trying to hash
                     //       the file in case this was simply a read issue.
                     panic!("Bitrot detected!")
                 }
             }
+
+            db_item
         } else {
             // We have no local entry for the target file in our DB, register it as a new file.
             result.new_items += 1;
@@ -213,10 +216,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 Self::fs_to_date_time(&metadata.last_mod_time()),
                 true,
                 &hash,
-            )?;
-        }
+            )?
+        };
 
-        Ok(result)
+        Ok((result, db_item))
     }
 
     fn perform_scan(
@@ -229,8 +232,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let data_store = self.db_access.get_this_data_store()?;
 
         // Index the currently scanned dir (e.g. add it to the DB if it does not exist).
-        scan_result =
-            scan_result.combine(&self.index_dir(&dir_path, &dir_metadata, &data_store)?);
+        let (dir_scan_result, dir_item) = &self.index_dir(&dir_path, &dir_metadata, &data_store)?;
+        scan_result = scan_result.combine(dir_scan_result);
 
         // Next, we index each file present on disk in this directory.
         // This is the 'positive' part of the scan operation, i.e. we add anything that is on
@@ -244,7 +247,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 let item_metadata = item.metadata.as_ref().unwrap();
                 match item_metadata.file_type() {
                     virtual_fs::FileType::File => {
-                        let file_scan_result = self.index_file(
+                        let (file_scan_result, _file_item) = self.index_file(
                             &item.relative_path,
                             &item_metadata,
                             &data_store,
@@ -274,10 +277,34 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // Lastly we perform the 'negative' operation of the scan process:
         // We load all known entries of the directory and see if there are any that are
         // no longer present on disk, thus signaling a deletion.
-        scan_result.deleted_items += 0;
-        // TODO: Look at all items that are in DB but no longer present in folder.
-        //       We need to delete them and recursively delete their child entries.
+        let child_items = self.db_access.get_child_data_items(&dir_item)?;
+        for child_item in child_items.iter() {
+            // TODO: further improve on items that might have changed only in capitalization.
+            if !item_names.contains(Path::new(child_item.path())) {
+                scan_result.deleted_items += self.delete_item(&child_item)?;
+            }
+        }
+
         Ok(scan_result)
+    }
+
+    fn delete_item(&self, item: &metadata_db::Item) -> Result<usize> {
+        let mut deleted_items = 0;
+
+        if !item.is_file() {
+            // Recurse into the directory and delete all children before deleting itself.
+            let child_items = self.db_access.get_child_data_items(&item)?;
+            for child_item in child_items.iter() {
+                self.delete_item(child_item)?;
+                deleted_items += 1;
+            }
+        }
+
+        // Delete the item itself
+        self.db_access.delete_local_data_item(&item)?;
+        deleted_items += 1;
+
+        Ok(deleted_items)
     }
 }
 
@@ -417,5 +444,20 @@ mod tests {
             }
         );
         assert_eq!(data_store_1.local_version().unwrap(), 9);
+
+        // Re-add some
+        in_memory_fs.create_file("file-1").unwrap();
+        in_memory_fs.create_dir("sUb-1").unwrap();
+        let changes = data_store_1.perform_full_scan().unwrap();
+        assert_eq!(
+            changes,
+            ScanResult {
+                indexed_items: 6,
+                changed_items: 0,
+                new_items: 2,
+                deleted_items: 0
+            }
+        );
+        assert_eq!(data_store_1.local_version().unwrap(), 11);
     }
 }

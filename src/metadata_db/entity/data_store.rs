@@ -10,8 +10,9 @@ pub struct DataStore {
     pub creation_date: chrono::NaiveDateTime,
     pub path_on_device: String,
     pub location_note: String,
+
     pub is_this_store: bool,
-    pub version: i64,
+    pub time: i64,
 }
 
 #[derive(Insertable)]
@@ -24,6 +25,7 @@ pub struct InsertFull<'a> {
     pub creation_date: &'a chrono::NaiveDateTime,
     pub path_on_device: &'a str,
     pub location_note: &'a str,
+
     pub is_this_store: bool,
-    pub version: i64,
+    pub time: i64,
 }
