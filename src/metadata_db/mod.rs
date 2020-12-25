@@ -150,15 +150,13 @@ impl MetadataDB {
         use self::schema::metadatas;
         use self::schema::owner_informations;
 
-        let join =
-            data_items::table.inner_join(owner_informations::table.inner_join(metadatas::table));
-        let filtered = join
-            .filter(data_items::path.eq(path)) // ignores case because of table definition
-            .filter(owner_informations::data_store_id.eq(for_data_store.id));
-
-        let result = filtered
+        let result = data_items::table
+            .filter(data_items::path.eq(path))
+            .inner_join(owner_informations::table.inner_join(metadatas::table))
+            .filter(owner_informations::data_store_id.eq(for_data_store.id))
             .first::<(DataItem, (OwnerInformation, Metadata))>(&self.conn)
             .optional()?;
+
         if let Some((item, (owner, meta))) = result {
             Ok(Some(Item::from_join_tuple(item, owner, meta)))
         } else {
@@ -230,28 +228,48 @@ impl MetadataDB {
                 )
             };
 
-            // Insert new data_item and associated owner information.
-            diesel::replace_into(data_items::table)
-                .values(data_item::InsertFull {
-                    data_set_id: local_data_store.data_set_id,
-                    parent_item_id: parent_item.map_or(None, |item| Some(item.id)),
-                    path: &path_string,
-                })
-                .execute(&self.conn)?;
-            let new_data_item = data_items::table
+            // Insert new data_item (...or keep existing one).
+            let existing_data_item = data_items::table
                 .filter(data_items::path.eq(&path_string))
-                .first::<DataItem>(&self.conn)?;
+                .first::<DataItem>(&self.conn)
+                .optional()?;
+            let new_data_item = if let Some(data_item) = existing_data_item {
+                data_item
+            } else {
+                diesel::insert_into(data_items::table)
+                    .values(data_item::InsertFull {
+                        parent_item_id: parent_item.map(|item| item.id),
+                        path: &path_string,
+                    })
+                    .execute(&self.conn)?;
 
-            diesel::replace_into(owner_informations::table)
-                .values(owner_information::InsertFull {
-                    data_item_id: new_data_item.id,
-                    data_store_id: local_data_store.id,
-                })
-                .execute(&self.conn)?;
-            let new_owner_info = owner_informations::table
+                data_items::table
+                    .filter(data_items::path.eq(&path_string))
+                    .first::<DataItem>(&self.conn)?
+            };
+
+            // Associate owner information with it (...or update an existing one, e.g.
+            // for a previously deleted item that still requires a deletion notice in the DB).
+            let existing_owner_information = owner_informations::table
                 .filter(owner_informations::data_item_id.eq(new_data_item.id))
                 .filter(owner_informations::data_store_id.eq(local_data_store.id))
-                .first::<OwnerInformation>(&self.conn)?;
+                .first::<OwnerInformation>(&self.conn)
+                .optional()?;
+            let new_owner_info = if let Some(owner_info) = existing_owner_information {
+                owner_info
+            } else {
+                diesel::insert_into(owner_informations::table)
+                    .values(owner_information::InsertFull {
+                        data_item_id: new_data_item.id,
+                        data_store_id: local_data_store.id,
+                    })
+                    .execute(&self.conn)?;
+
+                owner_informations::table
+                    .filter(owner_informations::data_item_id.eq(new_data_item.id))
+                    .filter(owner_informations::data_store_id.eq(local_data_store.id))
+                    .first::<OwnerInformation>(&self.conn)?
+            };
 
             // Also update the new item's modification time to match its creation time.
             // This gives the item a 'proper' modification event to be used in later comparisons.
@@ -472,9 +490,10 @@ impl MetadataDB {
     }
 
     fn default_db_settings(&self) -> Result<()> {
-        sql_query("PRAGMA locking_mode = exclusive").execute(&self.conn)?;
+        sql_query("PRAGMA locking_mode = EXCLUSIVE").execute(&self.conn)?;
         sql_query("PRAGMA journal_mode = WAL").execute(&self.conn)?;
         sql_query("PRAGMA foreign_keys = 1").execute(&self.conn)?;
+        sql_query("PRAGMA cache_size = -64000").execute(&self.conn)?;
 
         Ok(())
     }

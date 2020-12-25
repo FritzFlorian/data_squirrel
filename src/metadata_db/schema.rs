@@ -25,7 +25,6 @@ table! {
 table! {
     data_items (id) {
         id -> BigInt,
-        data_set_id -> BigInt,
 
         parent_item_id -> Nullable<BigInt>,
         path -> Text,
@@ -84,7 +83,6 @@ allow_tables_to_appear_in_same_query!(
 );
 
 joinable!(data_stores -> data_sets(data_set_id));
-joinable!(data_items -> data_sets(data_set_id));
 // Can not use implicit self joins for data_items -> parent_item_id
 joinable!(owner_informations -> data_stores(data_store_id));
 joinable!(owner_informations -> data_items(data_item_id));

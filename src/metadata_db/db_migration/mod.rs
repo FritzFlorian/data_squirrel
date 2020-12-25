@@ -3,6 +3,7 @@
 ///
 /// upgrade_db(&connection); // upgrades to latest DB version
 mod version_001;
+mod version_002;
 
 use diesel::prelude::*;
 use diesel::sql_query;
@@ -19,7 +20,7 @@ pub enum MigrationError {
 pub type Result<T> = std::result::Result<T, MigrationError>;
 
 pub type DBVersion = i32;
-const REQUIRED_DB_VERSION: DBVersion = 1;
+const REQUIRED_DB_VERSION: DBVersion = 2;
 
 /// Upgrades the given database connection to the REQUIRED_DB_VERSION of the
 /// current application build.
@@ -49,6 +50,7 @@ fn migrate_up_from(conn: &SqliteConnection, version: DBVersion) -> Result<()> {
     match version {
         // Just run the know migration steps as a regular functions.
         0 => version_001::migrate(&conn)?,
+        1 => version_002::migrate(&conn)?,
         // We do not know how to handle this migration.
         _ => return Err(MigrationError::UnknownDBVersion { version }),
     };
@@ -149,6 +151,18 @@ mod tests {
         assert!(table_names.contains(&"sync_times".to_string()));
 
         assert_eq!(read_db_version(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn properly_upgrade_to_version_2() {
+        let conn = open_connection();
+
+        assert_eq!(read_db_version(&conn).unwrap(), 0);
+
+        migrate_up_from(&conn, 0).unwrap();
+        migrate_up_from(&conn, 1).unwrap();
+
+        assert_eq!(read_db_version(&conn).unwrap(), 2);
     }
 
     #[test]

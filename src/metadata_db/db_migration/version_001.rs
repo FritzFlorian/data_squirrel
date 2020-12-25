@@ -62,12 +62,11 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
     sql_query(
         "CREATE TABLE data_items(
                 id                  INTEGER PRIMARY KEY NOT NULL,
-                data_set_id         INTEGER NOT NULL,
                 
                 parent_item_id      INTEGER,
                 path                TEXT NOT NULL COLLATE NOCASE,
 
-                FOREIGN KEY(data_set_id)   REFERENCES data_sets(id),
+                UNIQUE(path),
                 FOREIGN KEY(parent_item_id)     REFERENCES data_items(id)
             )",
     )
