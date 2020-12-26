@@ -37,9 +37,14 @@ pub struct DataStore<FS: virtual_fs::FS> {
 pub type DefaultDataStore = DataStore<virtual_fs::WrapperFS>;
 
 impl<FS: virtual_fs::FS> DataStore<FS> {
+    /// Same as open_with_fs, but uses the default FS abstraction (OS native calls).
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with_fs(&path, FS::default())
     }
+    /// Opens a data_store at a given path on the local disk.
+    /// Makes sure that the required metadata directories and database are present.
+    ///
+    /// Returns errors if the data_store is already opened or does not exist.
     pub fn open_with_fs(path: &Path, fs: FS) -> Result<Self> {
         let fs_interaction = FSInteraction::open_with_fs(&path, fs)?;
         let metadata_db = MetadataDB::open(fs_interaction.metadata_db_path().to_str().unwrap())?;
@@ -50,6 +55,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         })
     }
 
+    /// Same as create_with_fs, but uses the default FS abstraction (OS native FS calls).
     pub fn create<P: AsRef<Path>>(
         path: P,
         data_set_unique_name: &str,
@@ -64,6 +70,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             FS::default(),
         )
     }
+    /// Creates a new data_store at the given path on disk.
+    /// Requires to be connected to a data_set by a unique identifier.
+    /// Can be initialized with different FS abstractions (e.g. for testing).
+    ///
+    /// Returns errors if e.g. the data_store already exists.
     pub fn create_with_fs<P: AsRef<Path>>(
         path: P,
         data_set_unique_name: &str,
@@ -99,16 +110,67 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         })
     }
 
-    pub fn local_version(&self) -> Result<i64> {
+    /// The local, logical time maintained in this data_store.
+    pub fn local_time(&self) -> Result<i64> {
         Ok(self.db_access.get_this_data_store()?.time)
     }
 
+    /// Re-indexes the data stored in this data_store.
+    ///
+    /// Traverses the data directory and performs the following actions for the metadata DB:
+    /// 1) Adds new files (not previously in the DB)
+    /// 2) Updates modified files (their content AND modification times changed)
+    /// 3) Removes missing files (previously in the DB, but not on disk anymore)
+    /// 4) optionally alerts about bit-rot (content changed, but modification times did not)
+    ///
+    /// While doing these actions at all times the modification times in the DB are kept up to date,
+    /// i.e. the local time counter is kept and attached to new or changed files.
     pub fn perform_full_scan(&self) -> Result<ScanResult> {
         let root_path = PathBuf::from("");
         let root_metadata = self.fs_access.metadata(&root_path)?;
 
         self.perform_scan(&root_path, &root_metadata)
     }
+
+    pub fn sync_file_from_other(&self, other: &Self, path: &Path) -> Result<()> {
+        // Check if we need to do anything (STEP 1).
+        // TODO: This should be step 1, i.e. check if we must copy over the file at all based on
+        //       information on a remote sync time.
+        // TODO: In the future we should also handle partial databases, i.e. transfers that might
+        //       not store all files and thus have not all sync/mod times present.
+        // if other.mod <= this.sync -> do nothing and return
+        // TODO: Once we determine we want to transfer it, pack it up into a 'sendable unit'.
+
+        // We actually need to perform some syncing (STEP 2).
+        // TODO: This should be step 2, i.e. take the previous package and apply it to the 'remote'
+        //       target store that we (previously) decided that wants our item.
+        // if is directory -> would need to recurs into it
+        // TODO: The recursing into the directory can be decided on a remote sending side only
+        //       with the sync times and local modification times.
+        // if this.dose_not_exists
+        {
+            // if other.creating_time <= this.sync -> independent creating, we should copy the file
+            // else -> conflict, we deleted a file that was modified in the other store
+        }
+        // if this.does_exists
+        {
+            // if this.mod <= other.sync -> we should copy the file, it is derived from the local file
+            // else -> conflict, concurrent modifications to the file
+        }
+
+        // TODO: The actual copy of the file contents should be step 3, as there might not always
+        //       be the need to copy over the whole file in advance.
+
+        // In any case, update the mod time to match the new version and set the sync
+        // time to be the element wise maximum of the previous sync times.
+        // Run algorithm to keep the database consistent (mod and sync times of parent items).
+
+        Ok(())
+    }
+
+    ///////////////////////////////////
+    // 'private' helpers start here
+    ///////////////////////////////////
 
     fn fs_to_date_time(fs_time: &filetime::FileTime) -> NaiveDateTime {
         NaiveDateTime::from_timestamp(fs_time.unix_seconds(), fs_time.nanoseconds())
@@ -406,7 +468,7 @@ mod tests {
                 deleted_items: 0
             }
         );
-        assert_eq!(data_store_1.local_version().unwrap(), 7);
+        assert_eq!(data_store_1.local_time().unwrap(), 7);
 
         // Detect new and changed files
         in_memory_fs.create_file("file-3").unwrap();
@@ -425,7 +487,7 @@ mod tests {
                 deleted_items: 0
             }
         );
-        assert_eq!(data_store_1.local_version().unwrap(), 9);
+        assert_eq!(data_store_1.local_time().unwrap(), 9);
 
         // Detect deleted files and directories
         in_memory_fs.remove_file("file-1").unwrap();
@@ -443,7 +505,7 @@ mod tests {
                 deleted_items: 4
             }
         );
-        assert_eq!(data_store_1.local_version().unwrap(), 9);
+        assert_eq!(data_store_1.local_time().unwrap(), 9);
 
         // Re-add some
         in_memory_fs.create_file("file-1").unwrap();
@@ -458,6 +520,6 @@ mod tests {
                 deleted_items: 0
             }
         );
-        assert_eq!(data_store_1.local_version().unwrap(), 11);
+        assert_eq!(data_store_1.local_time().unwrap(), 11);
     }
 }

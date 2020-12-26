@@ -111,13 +111,15 @@ impl MetadataDB {
 
         let result = self.conn.transaction(|| {
             // Check DB consistency
-            let this_store_already_exists =
-                select(exists(data_stores.filter(is_this_store.eq(true))))
-                    .get_result(&self.conn)?;
-            if this_store_already_exists {
-                return Err(MetadataDBError::ViolatesDBConsistency {
-                    message: "Must only have one data_store marked as local store!",
-                });
+            if new_store.is_this_store {
+                let this_store_already_exists =
+                    select(exists(data_stores.filter(is_this_store.eq(true))))
+                        .get_result(&self.conn)?;
+                if this_store_already_exists {
+                    return Err(MetadataDBError::ViolatesDBConsistency {
+                        message: "Must only have one data_store marked as local store!",
+                    });
+                }
             }
 
             // Insert new entry
@@ -164,7 +166,7 @@ impl MetadataDB {
         }
     }
 
-    // Queries all child items of a given DB item.
+    /// Queries all child items of a given DB item.
     pub fn get_child_data_items(&self, parent_item: &Item) -> Result<Vec<Item>> {
         use self::schema::data_items;
         use self::schema::metadatas;
@@ -356,6 +358,46 @@ impl MetadataDB {
         })?;
 
         Ok(())
+    }
+
+    /// Converts a version vector indexed by data_store unique names to an local representation,
+    /// indexed by database ID's. Operation can be reversed using id_to_named_version_vector(...).
+    pub fn named_to_id_version_vector(
+        &self,
+        named_vector: &VersionVector<String>,
+    ) -> Result<VersionVector<i64>> {
+        use self::schema::data_stores;
+
+        let mut result = VersionVector::new();
+        for (data_store_name, time) in named_vector.iter() {
+            let data_store_id = data_stores::table
+                .select(data_stores::id)
+                .filter(data_stores::unique_name.eq(data_store_name))
+                .first::<i64>(&self.conn)?;
+            result[&data_store_id] = *time;
+        }
+
+        Ok(result)
+    }
+
+    /// Converts a id vector indexed by local data_store DB Id's to an universial representation,
+    /// indexed by data_set names. Operation can be reversed using named_to_id_version_vector(...).
+    pub fn id_to_named_version_vector(
+        &self,
+        id_vector: &VersionVector<i64>,
+    ) -> Result<VersionVector<String>> {
+        use self::schema::data_stores;
+
+        let mut result = VersionVector::new();
+        for (data_store_id, time) in id_vector.iter() {
+            let data_store_id = data_stores::table
+                .select(data_stores::unique_name)
+                .find(data_store_id)
+                .first::<String>(&self.conn)?;
+            result[&data_store_id] = *time;
+        }
+
+        Ok(result)
     }
 
     /// Updates the modification time of the given item (via its owner information) to
@@ -670,5 +712,54 @@ mod tests {
         metadata_store.delete_local_data_item(&sub).unwrap();
         let children = metadata_store.get_child_data_items(&root).unwrap();
         assert_eq!(children.len(), 0);
+    }
+
+    #[test]
+    fn convert_from_and_to_named_version_vectors() {
+        let metadata_store = open_metadata_store();
+
+        // Create sample data stores
+        let data_set = metadata_store.create_data_set("abc").unwrap();
+        let data_store_a = metadata_store
+            .create_data_store(&data_store::InsertFull {
+                data_set_id: data_set.id,
+                unique_name: &"a",
+                human_name: &"a",
+                is_this_store: true,
+                time: 0,
+
+                creation_date: &NaiveDateTime::from_timestamp(0, 0),
+                path_on_device: &"/",
+                location_note: &"",
+            })
+            .unwrap();
+        let data_store_b = metadata_store
+            .create_data_store(&data_store::InsertFull {
+                data_set_id: data_set.id,
+                unique_name: &"b",
+                human_name: &"b",
+                is_this_store: false,
+                time: 0,
+
+                creation_date: &NaiveDateTime::from_timestamp(0, 0),
+                path_on_device: &"/",
+                location_note: &"",
+            })
+            .unwrap();
+
+        let mut named_vector_1 = VersionVector::<String>::new();
+        named_vector_1[&String::from("a")] = 1;
+        named_vector_1[&String::from("b")] = 2;
+
+        let id_vector_1 = metadata_store
+            .named_to_id_version_vector(&named_vector_1)
+            .unwrap();
+        assert_eq!(id_vector_1[&data_store_a.id], 1);
+        assert_eq!(id_vector_1[&data_store_b.id], 2);
+
+        let mut named_vector_1_copy = metadata_store
+            .id_to_named_version_vector(&id_vector_1)
+            .unwrap();
+        assert_eq!(named_vector_1, named_vector_1_copy);
     }
 }
