@@ -7,6 +7,10 @@ use chrono::NaiveDateTime;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod synchronization_messages;
+use self::synchronization_messages::*;
+use version_vector::VersionVector;
+
 #[derive(Debug)]
 pub enum DataStoreError {
     DataStoreNotSetup,
@@ -15,6 +19,9 @@ pub enum DataStoreError {
     },
     MetadataDBError {
         source: metadata_db::MetadataDBError,
+    },
+    UnexpectedState {
+        source: &'static str,
     },
 }
 pub type Result<T> = std::result::Result<T, DataStoreError>;
@@ -132,7 +139,69 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         self.perform_scan(&root_path, &root_metadata)
     }
 
-    pub fn sync_file_from_other(&self, other: &Self, path: &Path) -> Result<()> {
+    pub fn sync_step_1(&self, sync_request: SyncRequest) -> Result<SyncResponse> {
+        let data_store = self.db_access.get_this_data_store()?;
+        let local_dir_item = self
+            .db_access
+            .get_data_item(&data_store, &sync_request.dir_path.to_str().unwrap())?;
+
+        if let Some(local_dir_item) = local_dir_item {
+            let remote_dir_sync_time = self
+                .db_access
+                .named_to_id_version_vector(&sync_request.dir_sync_time)?;
+            let _local_dir_sync_time = self.db_access.get_sync_times(&local_dir_item.owner_info)?;
+            let local_dir_mod_time = self.db_access.get_mod_times(&local_dir_item.owner_info)?;
+
+            if local_dir_mod_time <= remote_dir_sync_time {
+                // We are up to date already, answer with a simple 'synced' message.
+            } else {
+                // Look for all children and send them!
+                // ...go straight to checking all children.
+                let mut _checked_paths = HashSet::<PathBuf>::new();
+                let mut response_items = Vec::<SyncResponseItem>::new();
+                for requested_data_item in sync_request.dir_items {
+                    let local_data_item = self.db_access.get_data_item(
+                        &data_store,
+                        &requested_data_item.item_path.to_str().unwrap(),
+                    )?;
+                    if let Some(_local_data_item) = local_data_item {
+                        // Potential Item Change
+                    } else {
+                        // Item Deletion
+                        response_items.push(SyncResponseItem {
+                            item_path: requested_data_item.item_path.clone(),
+                            // FIXME: need a way to get sync vectors of deleted files.
+                            sync_time: VersionVector::<String>::new(),
+                            sync_action: SyncResponseAction::Deleted,
+                        });
+                    }
+                }
+
+                // Two special cases: 1) local item has not the same origin, 2) local item is deleted
+
+                // Case 1) must be handled by the other side, as we will NOT change anything in our store!
+
+                // Case 2) must have a deletion notice (implicit or explicit)
+                // -> We can answer with the delete sync time.
+                // -> On the other side use the 'normal' sync algo, i.e. either conflict free delete or
+                //    Display an issue of the type 'Data_store XYZ deleted file XYZ, which was modified in the meantime. How to proceed?'.
+            }
+
+            Err(DataStoreError::UnexpectedState {
+                source: "TODO: Implement the sync protocol!",
+            })
+        } else {
+            // This state could happen in reality if during the sync the FS changes and gets
+            // re-indexed. Actually, a lot other stuff can go wrong, e.g. if the FS does not
+            // match the DB. In any case, we call this an error. Just re-try the sync, as
+            // partial syncs should work just fine.
+            Err(DataStoreError::UnexpectedState {
+                source: "Synced directory does not exist!",
+            })
+        }
+    }
+
+    pub fn sync_file_from_other(&self, _other: &Self, _path: &Path) -> Result<()> {
         // Check if we need to do anything (STEP 1).
         // TODO: This should be step 1, i.e. check if we must copy over the file at all based on
         //       information on a remote sync time.

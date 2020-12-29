@@ -370,6 +370,7 @@ impl MetadataDB {
 
         let mut result = VersionVector::new();
         for (data_store_name, time) in named_vector.iter() {
+            // TODO: Special Error Type in case we do not know the other repo!
             let data_store_id = data_stores::table
                 .select(data_stores::id)
                 .filter(data_stores::unique_name.eq(data_store_name))
@@ -457,7 +458,10 @@ impl MetadataDB {
     /// Note: The modification time vector represents (local data_store_id -> time) pairs,
     ///       for  exchange with other data_stores it must be 'translated' to a vector version
     ///       where times are identified by ('unique-str' -> time) pairs.
-    fn get_mod_times(&self, owner_information: &OwnerInformation) -> Result<VersionVector<i64>> {
+    pub fn get_mod_times(
+        &self,
+        owner_information: &OwnerInformation,
+    ) -> Result<VersionVector<i64>> {
         use self::schema::mod_times;
 
         let mod_times: Vec<ModTime> = mod_times::table
@@ -467,6 +471,31 @@ impl MetadataDB {
         let mut result = VersionVector::new();
         for mod_time in &mod_times {
             result[&mod_time.data_store_id] = mod_time.time;
+        }
+
+        Ok(result)
+    }
+
+    /// Queries the synchronization time vector for a given OwnerInformation
+    /// (and thus indirectly for the associated data_item).
+    ///
+    /// Note: The synchronization time vector represents (local data_store_id -> time) pairs,
+    ///       for  exchange with other data_stores it must be 'translated' to a vector version
+    ///       where times are identified by ('unique-str' -> time) pairs.
+    pub fn get_sync_times(
+        &self,
+        owner_information: &OwnerInformation,
+    ) -> Result<VersionVector<i64>> {
+        use self::schema::sync_times;
+
+        let sync_times: Vec<ModTime> = sync_times::table
+            .filter(sync_times::owner_information_id.eq(owner_information.id))
+            .load(&self.conn)?;
+
+        let mut result = VersionVector::new();
+        for sync_time in &sync_times {
+            // FIXME: The sync times are not as simple. We need to iterate up the parent chain...
+            result[&sync_time.data_store_id] = sync_time.time;
         }
 
         Ok(result)
@@ -757,7 +786,7 @@ mod tests {
         assert_eq!(id_vector_1[&data_store_a.id], 1);
         assert_eq!(id_vector_1[&data_store_b.id], 2);
 
-        let mut named_vector_1_copy = metadata_store
+        let named_vector_1_copy = metadata_store
             .id_to_named_version_vector(&id_vector_1)
             .unwrap();
         assert_eq!(named_vector_1, named_vector_1_copy);
