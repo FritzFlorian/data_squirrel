@@ -165,7 +165,7 @@ impl FS for InMemoryFS {
                     }
                 })
                 .map(|(_, entry)| DirEntry {
-                    path: entry.path.clone(),
+                    file_name: entry.path.file_name().unwrap().to_owned(),
                 })
                 .collect();
 

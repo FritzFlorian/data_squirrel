@@ -5,12 +5,12 @@ pub struct DataItem {
     pub id: i64,
 
     pub parent_item_id: Option<i64>,
-    pub path: String,
+    pub path_component: String,
 }
 
 #[derive(Insertable)]
 #[table_name = "data_items"]
 pub struct InsertFull<'a> {
     pub parent_item_id: Option<i64>,
-    pub path: &'a str,
+    pub path_component: &'a str,
 }

@@ -1,43 +1,46 @@
-pub struct Item {
+use version_vector::VersionVector;
+
+pub struct ItemInternal {
     pub data_item: super::DataItem,
     pub owner_info: super::OwnerInformation,
-    pub metadata: super::Metadata,
+    pub metadata: Option<super::Metadata>,
+    pub mod_time: Option<VersionVector<i64>>,
+    pub sync_time: Option<VersionVector<i64>>,
 }
 
-impl Item {
+pub struct Item {
+    pub path_component: String,
+    pub content: ItemType,
+    // TODO: add ignore/sync status
+}
+pub enum ItemType {
+    FILE {
+        metadata: Option<super::Metadata>,
+        mod_time: VersionVector<i64>,
+        sync_time: VersionVector<i64>,
+    },
+    FOLDER {
+        metadata: Option<super::Metadata>,
+        mod_time: VersionVector<i64>,
+        sync_time: VersionVector<i64>,
+    },
+    DELETION {
+        sync_time: VersionVector<i64>,
+    },
+}
+
+impl ItemInternal {
     pub fn from_join_tuple(
         item: super::DataItem,
         owner: super::OwnerInformation,
-        metadata: super::Metadata,
+        meta: Option<super::Metadata>,
     ) -> Self {
         Self {
             data_item: item,
             owner_info: owner,
-            metadata: metadata,
+            metadata: meta,
+            mod_time: None,
+            sync_time: None,
         }
-    }
-
-    pub fn path(&self) -> &str {
-        &self.data_item.path
-    }
-
-    pub fn creator_store_id(&self) -> i64 {
-        self.metadata.creator_store_id
-    }
-    pub fn creator_store_time(&self) -> i64 {
-        self.metadata.creator_store_time
-    }
-
-    pub fn is_file(&self) -> bool {
-        self.metadata.is_file
-    }
-    pub fn creation_time(&self) -> chrono::NaiveDateTime {
-        self.metadata.creation_time
-    }
-    pub fn mod_time(&self) -> chrono::NaiveDateTime {
-        self.metadata.mod_time
-    }
-    pub fn hash(&self) -> &str {
-        &self.metadata.hash
     }
 }

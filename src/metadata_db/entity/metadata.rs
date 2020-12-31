@@ -1,6 +1,6 @@
 use super::schema::metadatas;
 
-#[derive(Debug, Queryable)]
+#[derive(Debug, Queryable, Clone)]
 pub struct Metadata {
     pub id: i64,
     pub owner_information_id: i64,
@@ -8,7 +8,6 @@ pub struct Metadata {
     pub creator_store_id: i64,
     pub creator_store_time: i64,
 
-    pub is_file: bool,
     pub creation_time: chrono::NaiveDateTime,
     pub mod_time: chrono::NaiveDateTime,
     pub hash: String,
@@ -22,7 +21,6 @@ pub struct InsertFull {
     pub creator_store_id: i64,
     pub creator_store_time: i64,
 
-    pub is_file: bool,
     pub creation_time: chrono::NaiveDateTime,
     pub mod_time: chrono::NaiveDateTime,
     pub hash: String,

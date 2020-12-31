@@ -9,7 +9,7 @@ use std::ops::{Index, IndexMut};
 use std::fmt::Debug;
 use std::hash::Hash;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VersionVector<Key: PartialEq + Eq + Hash + Clone + Debug> {
     versions: HashMap<Key, i64>,
 }

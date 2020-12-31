@@ -6,6 +6,9 @@ pub struct OwnerInformation {
 
     pub data_store_id: i64,
     pub data_item_id: i64,
+
+    pub is_file: bool,
+    pub is_deleted: bool,
 }
 
 #[derive(Insertable)]
@@ -13,4 +16,7 @@ pub struct OwnerInformation {
 pub struct InsertFull {
     pub data_store_id: i64,
     pub data_item_id: i64,
+
+    pub is_file: bool,
+    pub is_deleted: bool,
 }

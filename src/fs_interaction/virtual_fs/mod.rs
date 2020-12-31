@@ -31,7 +31,7 @@ pub trait FS: Clone {
 /// Represents a single entry in a directory.
 /// Has the bare minimum information it needs attached to it.
 pub struct DirEntry {
-    pub path: PathBuf,
+    pub file_name: OsString,
 }
 
 /// A wrapper around metadata we require in our application.
@@ -90,3 +90,4 @@ pub use self::wrapper_fs::WrapperFS;
 
 mod in_memory_fs;
 pub use self::in_memory_fs::InMemoryFS;
+use std::ffi::OsString;

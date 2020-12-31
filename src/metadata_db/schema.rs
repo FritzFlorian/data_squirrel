@@ -27,15 +27,19 @@ table! {
         id -> BigInt,
 
         parent_item_id -> Nullable<BigInt>,
-        path -> Text,
+        path_component -> Text,
     }
 }
 
 table! {
     owner_informations (id) {
         id -> BigInt,
+
         data_store_id -> BigInt,
         data_item_id -> BigInt,
+
+        is_file -> Bool,
+        is_deleted -> Bool,
     }
 }
 
@@ -47,7 +51,6 @@ table! {
         creator_store_id -> BigInt,
         creator_store_time -> BigInt,
 
-        is_file -> Bool,
         creation_time -> Timestamp,
         mod_time -> Timestamp,
         hash -> Text,

@@ -13,3 +13,5 @@ pub mod owner_information;
 pub use self::owner_information::OwnerInformation;
 pub mod mod_time;
 pub use self::mod_time::ModTime;
+pub mod sync_time;
+pub use self::sync_time::SyncTime;

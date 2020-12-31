@@ -64,9 +64,9 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
                 id                  INTEGER PRIMARY KEY NOT NULL,
                 
                 parent_item_id      INTEGER,
-                path                TEXT NOT NULL COLLATE NOCASE,
+                path_component      TEXT NOT NULL COLLATE NOCASE,
 
-                UNIQUE(path),
+                UNIQUE(path_component, parent_item_id),
                 FOREIGN KEY(parent_item_id)     REFERENCES data_items(id)
             )",
     )
@@ -96,6 +96,9 @@ fn create_table_owner_informations(conn: &SqliteConnection) -> Result<()> {
                 data_store_id   INTEGER NOT NULL,
                 data_item_id    INTEGER NOT NULL,
 
+                is_file                 INTEGER NOT NULL,
+                is_deleted              INTEGER NOT NULL,
+
                 UNIQUE(data_store_id, data_item_id),
                 FOREIGN KEY(data_store_id)      REFERENCES data_stores(id),
                 FOREIGN KEY(data_item_id)       REFERENCES data_items(id)
@@ -119,7 +122,6 @@ fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
                 creator_store_id    INTEGER NOT NULL,
                 creator_store_time        INTEGER NOT NULL,
 
-                is_file                 INTEGER NOT NULL, 
                 creation_time           TEXT NOT NULL,
                 mod_time                TEXT NOT NULL,
                 hash                    TEXT NOT NULL,

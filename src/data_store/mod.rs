@@ -5,11 +5,10 @@ use crate::metadata_db;
 use crate::metadata_db::MetadataDB;
 use chrono::NaiveDateTime;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 
 mod synchronization_messages;
-use self::synchronization_messages::*;
-use version_vector::VersionVector;
+use fs_interaction::relative_path::RelativePath;
+use std::path::Path;
 
 #[derive(Debug)]
 pub enum DataStoreError {
@@ -133,109 +132,109 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     /// While doing these actions at all times the modification times in the DB are kept up to date,
     /// i.e. the local time counter is kept and attached to new or changed files.
     pub fn perform_full_scan(&self) -> Result<ScanResult> {
-        let root_path = PathBuf::from("");
+        let root_path = RelativePath::from_path("");
         let root_metadata = self.fs_access.metadata(&root_path)?;
 
         self.perform_scan(&root_path, &root_metadata)
     }
 
-    pub fn sync_step_1(&self, sync_request: SyncRequest) -> Result<SyncResponse> {
-        let data_store = self.db_access.get_this_data_store()?;
-        let local_dir_item = self
-            .db_access
-            .get_data_item(&data_store, &sync_request.dir_path.to_str().unwrap())?;
-
-        if let Some(local_dir_item) = local_dir_item {
-            let remote_dir_sync_time = self
-                .db_access
-                .named_to_id_version_vector(&sync_request.dir_sync_time)?;
-            let _local_dir_sync_time = self.db_access.get_sync_times(&local_dir_item.owner_info)?;
-            let local_dir_mod_time = self.db_access.get_mod_times(&local_dir_item.owner_info)?;
-
-            if local_dir_mod_time <= remote_dir_sync_time {
-                // We are up to date already, answer with a simple 'synced' message.
-            } else {
-                // Look for all children and send them!
-                // ...go straight to checking all children.
-                let mut _checked_paths = HashSet::<PathBuf>::new();
-                let mut response_items = Vec::<SyncResponseItem>::new();
-                for requested_data_item in sync_request.dir_items {
-                    let local_data_item = self.db_access.get_data_item(
-                        &data_store,
-                        &requested_data_item.item_path.to_str().unwrap(),
-                    )?;
-                    if let Some(_local_data_item) = local_data_item {
-                        // Potential Item Change
-                    } else {
-                        // Item Deletion
-                        response_items.push(SyncResponseItem {
-                            item_path: requested_data_item.item_path.clone(),
-                            // FIXME: need a way to get sync vectors of deleted files.
-                            sync_time: VersionVector::<String>::new(),
-                            sync_action: SyncResponseAction::Deleted,
-                        });
-                    }
-                }
-
-                // Two special cases: 1) local item has not the same origin, 2) local item is deleted
-
-                // Case 1) must be handled by the other side, as we will NOT change anything in our store!
-
-                // Case 2) must have a deletion notice (implicit or explicit)
-                // -> We can answer with the delete sync time.
-                // -> On the other side use the 'normal' sync algo, i.e. either conflict free delete or
-                //    Display an issue of the type 'Data_store XYZ deleted file XYZ, which was modified in the meantime. How to proceed?'.
-            }
-
-            Err(DataStoreError::UnexpectedState {
-                source: "TODO: Implement the sync protocol!",
-            })
-        } else {
-            // This state could happen in reality if during the sync the FS changes and gets
-            // re-indexed. Actually, a lot other stuff can go wrong, e.g. if the FS does not
-            // match the DB. In any case, we call this an error. Just re-try the sync, as
-            // partial syncs should work just fine.
-            Err(DataStoreError::UnexpectedState {
-                source: "Synced directory does not exist!",
-            })
-        }
-    }
-
-    pub fn sync_file_from_other(&self, _other: &Self, _path: &Path) -> Result<()> {
-        // Check if we need to do anything (STEP 1).
-        // TODO: This should be step 1, i.e. check if we must copy over the file at all based on
-        //       information on a remote sync time.
-        // TODO: In the future we should also handle partial databases, i.e. transfers that might
-        //       not store all files and thus have not all sync/mod times present.
-        // if other.mod <= this.sync -> do nothing and return
-        // TODO: Once we determine we want to transfer it, pack it up into a 'sendable unit'.
-
-        // We actually need to perform some syncing (STEP 2).
-        // TODO: This should be step 2, i.e. take the previous package and apply it to the 'remote'
-        //       target store that we (previously) decided that wants our item.
-        // if is directory -> would need to recurs into it
-        // TODO: The recursing into the directory can be decided on a remote sending side only
-        //       with the sync times and local modification times.
-        // if this.dose_not_exists
-        {
-            // if other.creating_time <= this.sync -> independent creating, we should copy the file
-            // else -> conflict, we deleted a file that was modified in the other store
-        }
-        // if this.does_exists
-        {
-            // if this.mod <= other.sync -> we should copy the file, it is derived from the local file
-            // else -> conflict, concurrent modifications to the file
-        }
-
-        // TODO: The actual copy of the file contents should be step 3, as there might not always
-        //       be the need to copy over the whole file in advance.
-
-        // In any case, update the mod time to match the new version and set the sync
-        // time to be the element wise maximum of the previous sync times.
-        // Run algorithm to keep the database consistent (mod and sync times of parent items).
-
-        Ok(())
-    }
+    // pub fn sync_step_1(&self, sync_request: SyncRequest) -> Result<SyncResponse> {
+    //     let data_store = self.db_access.get_this_data_store()?;
+    //     let local_dir_item = self
+    //         .db_access
+    //         .get_data_item(&data_store, &sync_request.dir_path.to_str().unwrap())?;
+    //
+    //     if let Some(local_dir_item) = local_dir_item {
+    //         let remote_dir_sync_time = self
+    //             .db_access
+    //             .named_to_id_version_vector(&sync_request.dir_sync_time)?;
+    //         let _local_dir_sync_time = self.db_access.get_sync_times(&local_dir_item.owner_info)?;
+    //         let local_dir_mod_time = self.db_access.get_mod_times(&local_dir_item.owner_info)?;
+    //
+    //         if local_dir_mod_time <= remote_dir_sync_time {
+    //             // We are up to date already, answer with a simple 'synced' message.
+    //         } else {
+    //             // Look for all children and send them!
+    //             // ...go straight to checking all children.
+    //             let mut _checked_paths = HashSet::<PathBuf>::new();
+    //             let mut response_items = Vec::<SyncResponseItem>::new();
+    //             for requested_data_item in sync_request.dir_items {
+    //                 let local_data_item = self.db_access.get_data_item(
+    //                     &data_store,
+    //                     &requested_data_item.item_path.to_str().unwrap(),
+    //                 )?;
+    //                 if let Some(_local_data_item) = local_data_item {
+    //                     // Potential Item Change
+    //                 } else {
+    //                     // Item Deletion
+    //                     response_items.push(SyncResponseItem {
+    //                         item_path: requested_data_item.item_path.clone(),
+    //                         // FIXME: need a way to get sync vectors of deleted files.
+    //                         sync_time: VersionVector::<String>::new(),
+    //                         sync_action: SyncResponseAction::Deleted,
+    //                     });
+    //                 }
+    //             }
+    //
+    //             // Two special cases: 1) local item has not the same origin, 2) local item is deleted
+    //
+    //             // Case 1) must be handled by the other side, as we will NOT change anything in our store!
+    //
+    //             // Case 2) must have a deletion notice (implicit or explicit)
+    //             // -> We can answer with the delete sync time.
+    //             // -> On the other side use the 'normal' sync algo, i.e. either conflict free delete or
+    //             //    Display an issue of the type 'Data_store XYZ deleted file XYZ, which was modified in the meantime. How to proceed?'.
+    //         }
+    //
+    //         Err(DataStoreError::UnexpectedState {
+    //             source: "TODO: Implement the sync protocol!",
+    //         })
+    //     } else {
+    //         // This state could happen in reality if during the sync the FS changes and gets
+    //         // re-indexed. Actually, a lot other stuff can go wrong, e.g. if the FS does not
+    //         // match the DB. In any case, we call this an error. Just re-try the sync, as
+    //         // partial syncs should work just fine.
+    //         Err(DataStoreError::UnexpectedState {
+    //             source: "Synced directory does not exist!",
+    //         })
+    //     }
+    // }
+    //
+    // pub fn sync_file_from_other(&self, _other: &Self, _path: &Path) -> Result<()> {
+    //     // Check if we need to do anything (STEP 1).
+    //     // TODO: This should be step 1, i.e. check if we must copy over the file at all based on
+    //     //       information on a remote sync time.
+    //     // TODO: In the future we should also handle partial databases, i.e. transfers that might
+    //     //       not store all files and thus have not all sync/mod times present.
+    //     // if other.mod <= this.sync -> do nothing and return
+    //     // TODO: Once we determine we want to transfer it, pack it up into a 'sendable unit'.
+    //
+    //     // We actually need to perform some syncing (STEP 2).
+    //     // TODO: This should be step 2, i.e. take the previous package and apply it to the 'remote'
+    //     //       target store that we (previously) decided that wants our item.
+    //     // if is directory -> would need to recurs into it
+    //     // TODO: The recursing into the directory can be decided on a remote sending side only
+    //     //       with the sync times and local modification times.
+    //     // if this.dose_not_exists
+    //     {
+    //         // if other.creating_time <= this.sync -> independent creating, we should copy the file
+    //         // else -> conflict, we deleted a file that was modified in the other store
+    //     }
+    //     // if this.does_exists
+    //     {
+    //         // if this.mod <= other.sync -> we should copy the file, it is derived from the local file
+    //         // else -> conflict, concurrent modifications to the file
+    //     }
+    //
+    //     // TODO: The actual copy of the file contents should be step 3, as there might not always
+    //     //       be the need to copy over the whole file in advance.
+    //
+    //     // In any case, update the mod time to match the new version and set the sync
+    //     // time to be the element wise maximum of the previous sync times.
+    //     // Run algorithm to keep the database consistent (mod and sync times of parent items).
+    //
+    //     Ok(())
+    // }
 
     ///////////////////////////////////
     // 'private' helpers start here
@@ -247,115 +246,153 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
     fn index_dir(
         &self,
-        path: &Path,
+        path: &RelativePath,
         metadata: &virtual_fs::Metadata,
         data_store: &metadata_db::DataStore,
-    ) -> Result<(ScanResult, metadata_db::Item)> {
+    ) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
-        let dir_db_entry = self
-            .db_access
-            .get_data_item(&data_store, path.to_str().unwrap())?;
+        let dir_creation_time = Self::fs_to_date_time(&metadata.creation_time());
+        let dir_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
 
-        let db_item = if let Some(db_item) = dir_db_entry {
-            // TODO: Check if we find metadata changes and apply them.
-            //       An open question is if we handle this as a change or not.
-            // TODO: Optionally also see if the path changed in upper/lower cases and note it.
+        let db_item = self.db_access.get_data_item(&data_store, &path)?;
+        match db_item {
+            metadata_db::Item {
+                content: metadata_db::ItemType::FILE { .. },
+                ..
+            } => {
+                // Delete existing file
+                result.deleted_items += 1;
+                self.db_access.delete_local_data_item(&path)?;
+                // Create new dir entry
+                result.new_items += 1;
+                self.db_access.update_local_data_item(
+                    &path,
+                    dir_creation_time,
+                    dir_mod_time,
+                    false,
+                    "",
+                )?;
+            }
+            metadata_db::Item {
+                content: metadata_db::ItemType::FOLDER { metadata, .. },
+                ..
+            } => {
+                // Simply update the relevant metadata if it is out of sync.
+                let metadata = metadata.unwrap();
+                if metadata.mod_time != dir_mod_time || metadata.creation_time != dir_creation_time
+                {
+                    result.changed_items += 1;
+                    self.db_access.update_local_data_item(
+                        &path,
+                        dir_creation_time,
+                        dir_mod_time,
+                        false,
+                        "",
+                    )?;
+                }
+            }
+            metadata_db::Item {
+                content: metadata_db::ItemType::DELETION { .. },
+                ..
+            } => {
+                // Create new dir entry
+                result.new_items += 1;
+                self.db_access.update_local_data_item(
+                    &path,
+                    dir_creation_time,
+                    dir_mod_time,
+                    false,
+                    "",
+                )?;
+            }
+        }
 
-            db_item
-        } else {
-            result.new_items += 1;
-
-            self.db_access.create_local_data_item(
-                &path,
-                Self::fs_to_date_time(&metadata.creation_time()),
-                Self::fs_to_date_time(&metadata.last_mod_time()),
-                false,
-                "",
-            )?
-        };
-
-        Ok((result, db_item))
+        Ok(result)
     }
 
     fn index_file(
         &self,
-        path: &Path,
+        path: &RelativePath,
         metadata: &virtual_fs::Metadata,
         data_store: &metadata_db::DataStore,
         detect_bitrot: bool,
-    ) -> Result<(ScanResult, metadata_db::Item)> {
+    ) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
-        let item_db_entry = self
-            .db_access
-            .get_data_item(&data_store, path.to_str().unwrap())?;
+        let file_creation_time = Self::fs_to_date_time(&metadata.creation_time());
+        let file_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
 
-        let db_item = if let Some(db_item) = item_db_entry {
-            // TODO: Inspect more changes in metadata.
-            //       Decide how we handle them, e.g. is a permission change or a change in
-            //       file creating time note-worthy? If so, do we simply record it as a local change
-            //       to our DB's metadata or do we take not of it as 'this file changed'?.
-            // TODO: Detect a rather 'big' change: What is now a file was a directory before!!!
-            //       Currently we think this would be best handled by deleting the entry and then
-            //       re-adding it.
-            if Self::fs_to_date_time(&metadata.last_mod_time()) != db_item.mod_time() {
+        let db_item = self.db_access.get_data_item(&data_store, path)?;
+        match db_item {
+            metadata_db::Item {
+                content: metadata_db::ItemType::FILE { metadata, .. },
+                ..
+            } => {
                 use data_encoding::HEXUPPER;
                 let hash = self.fs_access.calculate_hash(&path)?;
                 let hash = HEXUPPER.encode(hash.as_ref());
+                let metadata = metadata.unwrap();
 
-                if db_item.hash() != hash {
+                // We got an existing entry, see if it requires updating.
+                if metadata.creation_time != file_creation_time
+                    || metadata.mod_time != file_mod_time
+                {
                     result.changed_items += 1;
-
-                    self.db_access.modify_local_data_item(
-                        &db_item,
-                        &Self::fs_to_date_time(&metadata.creation_time()),
-                        &Self::fs_to_date_time(&metadata.last_mod_time()),
+                    self.db_access.update_local_data_item(
+                        &path,
+                        file_creation_time,
+                        file_mod_time,
+                        true,
                         &hash,
                     )?;
-                } else {
-                    // TODO: handle cases where ONLY metadata changes.
-                    //       Closely related to the above question which metadata changes
-                    //       are noteworthy as a 'this file changed' event.
+                } else if detect_bitrot {
+                    let hash = self.fs_access.calculate_hash(&path)?;
+                    let hash = HEXUPPER.encode(hash.as_ref());
+
+                    if metadata.hash != hash {
+                        // TODO: properly handle this by returning errors. Maybe re-trying to hash
+                        //       the file in case this was simply a read issue.
+                        panic!("Bitrot detected!")
+                    }
                 }
-            } else if detect_bitrot {
+            }
+            metadata_db::Item {
+                content: metadata_db::ItemType::FOLDER { .. },
+                ..
+            } => {
+                // FIXME: Handle if a folder is changed to be a file.
+                panic!("Changing folders to files is not supported!");
+            }
+            metadata_db::Item {
+                content: metadata_db::ItemType::DELETION { .. },
+                ..
+            } => {
+                // We have no local entry for the target file in our DB, register it as a new file.
+                result.new_items += 1;
+
                 use data_encoding::HEXUPPER;
                 let hash = self.fs_access.calculate_hash(&path)?;
                 let hash = HEXUPPER.encode(hash.as_ref());
 
-                if db_item.hash() != hash {
-                    // TODO: properly handle this by returning errors. Maybe re-trying to hash
-                    //       the file in case this was simply a read issue.
-                    panic!("Bitrot detected!")
-                }
+                self.db_access.update_local_data_item(
+                    &path,
+                    file_creation_time,
+                    file_mod_time,
+                    true,
+                    &hash,
+                )?;
             }
+        }
 
-            db_item
-        } else {
-            // We have no local entry for the target file in our DB, register it as a new file.
-            result.new_items += 1;
-
-            use data_encoding::HEXUPPER;
-            let hash = self.fs_access.calculate_hash(&path)?;
-            let hash = HEXUPPER.encode(hash.as_ref());
-
-            self.db_access.create_local_data_item(
-                &path,
-                Self::fs_to_date_time(&metadata.creation_time()),
-                Self::fs_to_date_time(&metadata.last_mod_time()),
-                true,
-                &hash,
-            )?
-        };
-
-        Ok((result, db_item))
+        Ok(result)
     }
 
     fn perform_scan(
         &self,
-        dir_path: &Path,
+        dir_path: &RelativePath,
         dir_metadata: &virtual_fs::Metadata,
     ) -> Result<ScanResult> {
         // We keep track of 'scan events' to have a rough output on a run of the scan function.
@@ -363,8 +400,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let data_store = self.db_access.get_this_data_store()?;
 
         // Index the currently scanned dir (e.g. add it to the DB if it does not exist).
-        let (dir_scan_result, dir_item) = &self.index_dir(&dir_path, &dir_metadata, &data_store)?;
-        scan_result = scan_result.combine(dir_scan_result);
+        // (We exclude the root directory, as we never collect metadata on it).
+        if dir_path.get_path_components().len() > 1 {
+            let dir_scan_result = &self.index_dir(&dir_path, &dir_metadata, &data_store)?;
+            scan_result = scan_result.combine(dir_scan_result);
+        }
 
         // Next, we index each file present on disk in this directory.
         // This is the 'positive' part of the scan operation, i.e. we add anything that is on
@@ -378,7 +418,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 let item_metadata = item.metadata.as_ref().unwrap();
                 match item_metadata.file_type() {
                     virtual_fs::FileType::File => {
-                        let (file_scan_result, _file_item) = self.index_file(
+                        let file_scan_result = self.index_file(
                             &item.relative_path,
                             &item_metadata,
                             &data_store,
@@ -408,34 +448,20 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // Lastly we perform the 'negative' operation of the scan process:
         // We load all known entries of the directory and see if there are any that are
         // no longer present on disk, thus signaling a deletion.
-        let child_items = self.db_access.get_child_data_items(&dir_item)?;
+        let child_items = self
+            .db_access
+            .get_child_data_items(&data_store, &dir_path)?;
         for child_item in child_items.iter() {
             // TODO: further improve on items that might have changed only in capitalization.
-            if !item_names.contains(Path::new(child_item.path())) {
-                scan_result.deleted_items += self.delete_item(&child_item)?;
+
+            let child_item_path = dir_path.join(child_item.path_component.clone());
+            if !item_names.contains(&child_item_path) {
+                scan_result.deleted_items +=
+                    self.db_access.delete_local_data_item(&child_item_path)?;
             }
         }
 
         Ok(scan_result)
-    }
-
-    fn delete_item(&self, item: &metadata_db::Item) -> Result<usize> {
-        let mut deleted_items = 0;
-
-        if !item.is_file() {
-            // Recurse into the directory and delete all children before deleting itself.
-            let child_items = self.db_access.get_child_data_items(&item)?;
-            for child_item in child_items.iter() {
-                self.delete_item(child_item)?;
-                deleted_items += 1;
-            }
-        }
-
-        // Delete the item itself
-        self.db_access.delete_local_data_item(&item)?;
-        deleted_items += 1;
-
-        Ok(deleted_items)
     }
 }
 
@@ -531,9 +557,9 @@ mod tests {
         assert_eq!(
             changes,
             ScanResult {
-                indexed_items: 7,
+                indexed_items: 6,
                 changed_items: 0,
-                new_items: 7,
+                new_items: 6,
                 deleted_items: 0
             }
         );
@@ -550,7 +576,7 @@ mod tests {
         assert_eq!(
             changes,
             ScanResult {
-                indexed_items: 8,
+                indexed_items: 7,
                 changed_items: 1,
                 new_items: 1,
                 deleted_items: 0
@@ -568,13 +594,13 @@ mod tests {
         assert_eq!(
             changes,
             ScanResult {
-                indexed_items: 4,
+                indexed_items: 3,
                 changed_items: 0,
                 new_items: 0,
                 deleted_items: 4
             }
         );
-        assert_eq!(data_store_1.local_time().unwrap(), 9);
+        assert_eq!(data_store_1.local_time().unwrap(), 13);
 
         // Re-add some
         in_memory_fs.create_file("file-1").unwrap();
@@ -583,12 +609,12 @@ mod tests {
         assert_eq!(
             changes,
             ScanResult {
-                indexed_items: 6,
+                indexed_items: 5,
                 changed_items: 0,
                 new_items: 2,
                 deleted_items: 0
             }
         );
-        assert_eq!(data_store_1.local_time().unwrap(), 11);
+        assert_eq!(data_store_1.local_time().unwrap(), 15);
     }
 }

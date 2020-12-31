@@ -12,7 +12,7 @@ impl FS for WrapperFS {
         fs::canonicalize(path)
     }
     fn metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata> {
-        let native_metadata = fs::metadata(path)?;
+        let native_metadata = fs::symlink_metadata(path)?;
 
         Ok(Metadata {
             read_only: native_metadata.permissions().readonly(),
@@ -38,7 +38,11 @@ impl FS for WrapperFS {
     }
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>> {
         let result: Result<Vec<_>, _> = fs::read_dir(path)?
-            .map(|entry| entry.map(|entry| DirEntry { path: entry.path() }))
+            .map(|entry| {
+                entry.map(|entry| DirEntry {
+                    file_name: entry.file_name(),
+                })
+            })
             .collect();
 
         result
