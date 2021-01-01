@@ -65,6 +65,17 @@ impl RelativePath {
         self
     }
 
+    pub fn to_lower_case(&self) -> RelativePath {
+        let lower_case_path = self
+            .path_components
+            .iter()
+            .map(|component| component.to_lowercase())
+            .collect();
+        Self {
+            path_components: lower_case_path,
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.path_components.last().unwrap()
     }

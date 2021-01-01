@@ -156,7 +156,7 @@ impl MetadataDB {
                     .execute(&self.conn)?;
                 // It's fine that we DO NOT assign any mod or sync time.
                 // It implicitly defaults to all 0's, which is actually correct before any scan.
-                self.increase_local_time();
+                self.increase_local_time()?;
             }
 
             Ok(result)
@@ -204,7 +204,7 @@ impl MetadataDB {
             } else {
                 // The item has no more entry in the db, thus we 'create' a deletion notice.
                 Ok(Item {
-                    path_component: path.name().to_owned(),
+                    path_component: path.name().to_lowercase(),
                     content: ItemType::DELETION {
                         sync_time: final_sync_time,
                     },
@@ -221,6 +221,9 @@ impl MetadataDB {
         use self::schema::data_items;
         use self::schema::metadatas;
         use self::schema::owner_informations;
+
+        // We handle all path's in lower case in here!
+        let path = path.to_lower_case();
 
         // Note: Maybe re-work with 'WITH RECURSIVE' queries directly in sqlite.
         //       Wait for actual performance issues before trying to do this.
@@ -427,10 +430,12 @@ impl MetadataDB {
                 })
             } else {
                 let parent_dir_item = dir_path_items.last().unwrap();
+                let lower_case_name = path.name().to_lowercase();
+
                 if !parent_dir_item.owner_info.is_file {
                     // Insert new data_item (...or keep existing one).
                     let existing_data_item = data_items::table
-                        .filter(data_items::path_component.eq(path.name()))
+                        .filter(data_items::path_component.eq(&lower_case_name))
                         .filter(data_items::parent_item_id.eq(parent_dir_item.data_item.id))
                         .first::<DataItem>(&self.conn)
                         .optional()?;
@@ -440,12 +445,12 @@ impl MetadataDB {
                         diesel::insert_into(data_items::table)
                             .values(data_item::InsertFull {
                                 parent_item_id: Some(parent_dir_item.data_item.id),
-                                path_component: path.name(),
+                                path_component: &lower_case_name,
                             })
                             .execute(&self.conn)?;
 
                         data_items::table
-                            .filter(data_items::path_component.eq(path.name()))
+                            .filter(data_items::path_component.eq(lower_case_name))
                             .filter(data_items::parent_item_id.eq(parent_dir_item.data_item.id))
                             .first::<DataItem>(&self.conn)?
                     };
@@ -463,6 +468,14 @@ impl MetadataDB {
                                 message: "Must not change types of entries in the DB. Delete and re-create them instead!",
                             })
                         }
+                        if owner_info.is_deleted {
+                            // Register the change in deletion_status
+                            diesel::update(owner_informations::table)
+                                .filter(owner_informations::id.eq(owner_info.id))
+                                .set(owner_informations::is_deleted.eq(false))
+                                .execute(&self.conn)?;
+                        }
+
                         owner_info
                     } else {
                         diesel::insert_into(owner_informations::table)
@@ -497,6 +510,7 @@ impl MetadataDB {
                         diesel::update(metadatas::table)
                             .filter(metadatas::id.eq(metadata.id))
                             .set(metadata::UpdateMetadata{
+                                case_sensitive_name: path.name(),
                                 creation_time: &creation_time,
                                 mod_time: &mod_time,
                                 hash: &hash,
@@ -511,9 +525,10 @@ impl MetadataDB {
                                 creator_store_id: local_data_store.id,
                                 creator_store_time: new_time,
 
+                                case_sensitive_name: path.name(),
                                 creation_time: creation_time,
                                 mod_time: mod_time,
-                                hash: hash.to_string(),
+                                hash: hash,
                             })
                             .execute(&self.conn)?;
                     };
@@ -963,6 +978,14 @@ mod tests {
         assert_mod_time(&metadata_store, "sub", data_store.id, 3);
         assert_mod_time(&metadata_store, "sub/folder", data_store.id, 3);
 
+        // The database is invariant on capitalization when searching or inserting items
+        assert_mod_time(&metadata_store, "", data_store.id, 3);
+        assert_mod_time(&metadata_store, "sUb", data_store.id, 3);
+        assert_mod_time(&metadata_store, "sub/FolDer", data_store.id, 3);
+
+        insert_data_item(&metadata_store, "sUb", false);
+        assert_mod_time(&metadata_store, "sub", data_store.id, 4);
+
         // Check if child queries work
         let children = metadata_store
             .get_child_data_items(&data_store, &RelativePath::from_path(""))
@@ -991,6 +1014,10 @@ mod tests {
             } => assert_eq!(name, "sub"),
             _ => panic!("Must return the correct child item!"),
         }
+
+        // Create new files 'over' an previous deletion notice.
+        insert_data_item(&metadata_store, "SUB", false);
+        assert_mod_time(&metadata_store, "sub", data_store.id, 8);
 
         // TODO: Clean up deletion notices and re-query child items!
     }

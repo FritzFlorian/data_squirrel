@@ -64,7 +64,7 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
                 id                  INTEGER PRIMARY KEY NOT NULL,
                 
                 parent_item_id      INTEGER,
-                path_component      TEXT NOT NULL COLLATE NOCASE,
+                path_component      TEXT NOT NULL,
 
                 UNIQUE(path_component, parent_item_id),
                 FOREIGN KEY(parent_item_id)     REFERENCES data_items(id)
@@ -122,6 +122,7 @@ fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
                 creator_store_id    INTEGER NOT NULL,
                 creator_store_time        INTEGER NOT NULL,
 
+                case_sensitive_name     TEXT NOT NULL,
                 creation_time           TEXT NOT NULL,
                 mod_time                TEXT NOT NULL,
                 hash                    TEXT NOT NULL,

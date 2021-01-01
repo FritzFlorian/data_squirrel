@@ -281,7 +281,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             } => {
                 // Simply update the relevant metadata if it is out of sync.
                 let metadata = metadata.unwrap();
-                if metadata.mod_time != dir_mod_time || metadata.creation_time != dir_creation_time
+                if metadata.mod_time != dir_mod_time
+                    || metadata.creation_time != dir_creation_time
+                    || metadata.case_sensitive_name != path.name()
                 {
                     result.changed_items += 1;
                     self.db_access.update_local_data_item(
@@ -331,15 +333,16 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 content: metadata_db::ItemType::FILE { metadata, .. },
                 ..
             } => {
-                use data_encoding::HEXUPPER;
-                let hash = self.fs_access.calculate_hash(&path)?;
-                let hash = HEXUPPER.encode(hash.as_ref());
                 let metadata = metadata.unwrap();
-
                 // We got an existing entry, see if it requires updating.
                 if metadata.creation_time != file_creation_time
                     || metadata.mod_time != file_mod_time
+                    || metadata.case_sensitive_name != path.name()
                 {
+                    use data_encoding::HEXUPPER;
+                    let hash = self.fs_access.calculate_hash(&path)?;
+                    let hash = HEXUPPER.encode(hash.as_ref());
+
                     result.changed_items += 1;
                     self.db_access.update_local_data_item(
                         &path,
@@ -349,6 +352,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         &hash,
                     )?;
                 } else if detect_bitrot {
+                    use data_encoding::HEXUPPER;
                     let hash = self.fs_access.calculate_hash(&path)?;
                     let hash = HEXUPPER.encode(hash.as_ref());
 
@@ -410,9 +414,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // This is the 'positive' part of the scan operation, i.e. we add anything that is on
         // disk and not in the DB, as well as anything that has changed on dis.
         let items = self.fs_access.index(dir_path)?;
-        let mut item_names = HashSet::with_capacity(items.len());
+        let mut lower_case_entries = HashSet::with_capacity(items.len());
         for item in &items {
-            item_names.insert(item.relative_path.clone());
+            lower_case_entries.insert(item.relative_path.name().to_lowercase());
 
             if item.issues.is_empty() {
                 let item_metadata = item.metadata.as_ref().unwrap();
@@ -452,10 +456,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .db_access
             .get_child_data_items(&data_store, &dir_path)?;
         for child_item in child_items.iter() {
-            // TODO: further improve on items that might have changed only in capitalization.
-
-            let child_item_path = dir_path.join(child_item.path_component.clone());
-            if !item_names.contains(&child_item_path) {
+            if !lower_case_entries.contains(&child_item.path_component) {
+                let child_item_path = dir_path.join(child_item.path_component.clone());
                 scan_result.deleted_items +=
                     self.db_access.delete_local_data_item(&child_item_path)?;
             }
@@ -616,5 +618,23 @@ mod tests {
             }
         );
         assert_eq!(data_store_1.local_time().unwrap(), 15);
+
+        // Changes in capitalization should be recognized as metadata changes
+        in_memory_fs.remove_file("file-1").unwrap();
+        in_memory_fs.remove_dir("sUb-1").unwrap();
+
+        in_memory_fs.create_file("FILE-1").unwrap();
+        in_memory_fs.create_dir("SUB-1").unwrap();
+        let changes = data_store_1.perform_full_scan().unwrap();
+        assert_eq!(
+            changes,
+            ScanResult {
+                indexed_items: 5,
+                changed_items: 2,
+                new_items: 0,
+                deleted_items: 0
+            }
+        );
+        assert_eq!(data_store_1.local_time().unwrap(), 17);
     }
 }

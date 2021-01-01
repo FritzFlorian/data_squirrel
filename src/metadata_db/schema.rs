@@ -51,6 +51,7 @@ table! {
         creator_store_id -> BigInt,
         creator_store_time -> BigInt,
 
+        case_sensitive_name -> Text,
         creation_time -> Timestamp,
         mod_time -> Timestamp,
         hash -> Text,
