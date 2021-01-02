@@ -11,7 +11,6 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sqlite::SqliteConnection;
 use fs_interaction::relative_path::RelativePath;
-use metadata_db::schema::metadatas::columns::owner_information_id;
 use std::error::Error;
 use std::fmt;
 use version_vector::VersionVector;
@@ -343,6 +342,11 @@ impl MetadataDB {
                 },
             })
         }
+    }
+
+    pub fn get_local_child_data_items(&self, dir_path: &RelativePath) -> Result<Vec<Item>> {
+        let local_data_store = self.get_this_data_store()?;
+        self.get_child_data_items(&local_data_store, &dir_path)
     }
 
     /// Queries all child items of a given DB item.
