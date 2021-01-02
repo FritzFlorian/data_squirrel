@@ -33,6 +33,16 @@ impl<Key: PartialEq + Eq + Hash + Clone + Debug> VersionVector<Key> {
         }
     }
 
+    pub fn from_initial_values(values: Vec<(&Key, i64)>) -> Self {
+        let mut result = Self::new();
+        result.versions.reserve(values.len());
+        for (key, time) in values {
+            result[&key] = time;
+        }
+
+        result
+    }
+
     fn less_or_equal(&self, other: &Self) -> bool {
         for (key, self_value) in &self.versions {
             let other_value = other.versions.get(key).unwrap_or(&0);
@@ -124,13 +134,9 @@ mod tests {
         let peer_b = VersionPeer::new("B");
 
         // A -> 1, B -> 3
-        let mut first_vector = VersionVector::new();
-        first_vector[&peer_a] = 1;
-        first_vector[&peer_b] = 3;
+        let first_vector = VersionVector::from_initial_values(vec![(&peer_a, 1), (&peer_b, 3)]);
         // A -> 2, B -> 4
-        let mut second_vector = VersionVector::new();
-        second_vector[&peer_a] = 2;
-        second_vector[&peer_b] = 4;
+        let second_vector = VersionVector::from_initial_values(vec![(&peer_a, 2), (&peer_b, 4)]);
 
         assert_eq!(
             first_vector.partial_cmp(&second_vector),
@@ -173,18 +179,11 @@ mod tests {
         let peer_c = VersionPeer::new("C");
 
         // A -> 1, B -> 1, C -> 0
-        let mut v1 = VersionVector::new();
-        v1[&peer_a] = 1;
-        v1[&peer_b] = 1;
+        let v1 = VersionVector::from_initial_values(vec![(&peer_a, 1), (&peer_b, 1)]);
         // A -> 1, B -> 2, C -> 0
-        let mut v2 = VersionVector::new();
-        v2[&peer_a] = 1;
-        v2[&peer_b] = 2;
+        let v2 = VersionVector::from_initial_values(vec![(&peer_a, 1), (&peer_b, 2)]);
         // A -> 2, b -> 1, C -> 3
-        let mut v3 = VersionVector::new();
-        v3[&peer_a] = 2;
-        v3[&peer_b] = 1;
-        v3[&peer_c] = 3;
+        let v3 = VersionVector::from_initial_values(vec![(&peer_a, 2), (&peer_b, 1), (&peer_c, 3)]);
 
         assert_eq!(v1 == v1, true);
         assert_eq!(v1 <= v1, true);

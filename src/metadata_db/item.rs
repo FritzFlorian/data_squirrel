@@ -1,3 +1,4 @@
+use metadata_db::Metadata;
 use version_vector::VersionVector;
 
 pub struct ItemInternal {
@@ -27,6 +28,44 @@ pub enum ItemType {
     DELETION {
         sync_time: VersionVector<i64>,
     },
+}
+
+impl Item {
+    pub fn is_deletion(&self) -> bool {
+        matches!(self.content, ItemType::DELETION { .. })
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self.content, ItemType::FILE { .. })
+    }
+
+    pub fn is_folder(&self) -> bool {
+        matches!(self.content, ItemType::FOLDER{ .. })
+    }
+
+    pub fn mod_time(&self) -> &VersionVector<i64> {
+        match &self.content {
+            ItemType::FILE { mod_time, .. } => mod_time,
+            ItemType::FOLDER { mod_time, .. } => mod_time,
+            _ => panic!("Must not query mod_time of deletion notice!"),
+        }
+    }
+
+    pub fn sync_time(&self) -> &VersionVector<i64> {
+        match &self.content {
+            ItemType::FILE { sync_time, .. } => sync_time,
+            ItemType::FOLDER { sync_time, .. } => sync_time,
+            ItemType::DELETION { sync_time, .. } => sync_time,
+        }
+    }
+
+    pub fn metadata(&self) -> &Option<Metadata> {
+        match &self.content {
+            ItemType::FILE { metadata, .. } => metadata,
+            ItemType::FOLDER { metadata, .. } => metadata,
+            _ => panic!("Must not query metadata of deletion notice!"),
+        }
+    }
 }
 
 impl ItemInternal {

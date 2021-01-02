@@ -128,7 +128,7 @@ fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
                 hash                    TEXT NOT NULL,
     
                 UNIQUE(owner_information_id, creator_store_id, creator_store_time),
-                FOREIGN KEY(owner_information_id)      REFERENCES owner_informations(id)
+                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id)   ON DELETE CASCADE
             )",
     )
     .execute(conn)?;
@@ -151,8 +151,8 @@ fn create_table_mod_times(conn: &SqliteConnection) -> Result<()> {
                 time                    INTEGER NOT NULL,
 
                 UNIQUE(owner_information_id, data_store_id),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id),
-                FOREIGN KEY(data_store_id)          REFERENCES data_stores(id)
+                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id)   ON DELETE CASCADE,
+                FOREIGN KEY(data_store_id)          REFERENCES data_stores(id) 
             )",
     )
     .execute(conn)?;
@@ -175,7 +175,7 @@ fn create_table_sync_times(conn: &SqliteConnection) -> Result<()> {
                 time                    INTEGER NOT NULL,
 
                 UNIQUE(owner_information_id, data_store_id),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id),
+                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id)   ON DELETE CASCADE,
                 FOREIGN KEY(data_store_id)          REFERENCES data_stores(id)
             )",
     )

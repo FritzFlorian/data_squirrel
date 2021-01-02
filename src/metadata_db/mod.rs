@@ -11,6 +11,7 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sqlite::SqliteConnection;
 use fs_interaction::relative_path::RelativePath;
+use metadata_db::schema::metadatas::columns::owner_information_id;
 use std::error::Error;
 use std::fmt;
 use version_vector::VersionVector;
@@ -172,6 +173,13 @@ impl MetadataDB {
         Ok(data_stores
             .filter(is_this_store.eq(true))
             .first::<DataStore>(&self.conn)?)
+    }
+
+    // Queries a local data item from the DB
+    // (same as get_data_item but always from the local data store).
+    pub fn get_local_data_item(&self, path: &RelativePath) -> Result<Item> {
+        let local_data_store = self.get_this_data_store()?;
+        self.get_data_item(&local_data_store, &path)
     }
 
     /// Queries a data item from the DB and returns it.
@@ -393,8 +401,6 @@ impl MetadataDB {
         })
     }
 
-    // TODO: Clear-up/split the different actions on the db out from the
-    //       currently ONE BIG update call (both for clearer calls and called code).
     /// Modifies a data item for the local data store (making sure versions stay consistent).
     /// The method implicitly assigns the appropriate creation information and time stamps.
     /// The method implicitly assigns an appropriate update time to the item.
@@ -406,7 +412,6 @@ impl MetadataDB {
         is_file: bool,
         hash: &str,
     ) -> Result<()> {
-        use self::schema::data_items;
         use self::schema::metadatas;
         use self::schema::owner_informations;
 
@@ -432,28 +437,9 @@ impl MetadataDB {
                 let parent_dir_item = dir_path_items.last().unwrap();
                 let lower_case_name = path.name().to_lowercase();
 
+                // FIXME: Do not allow non-deleted child items in folders that are deleted
                 if !parent_dir_item.owner_info.is_file {
-                    // Insert new data_item (...or keep existing one).
-                    let existing_data_item = data_items::table
-                        .filter(data_items::path_component.eq(&lower_case_name))
-                        .filter(data_items::parent_item_id.eq(parent_dir_item.data_item.id))
-                        .first::<DataItem>(&self.conn)
-                        .optional()?;
-                    let new_data_item = if let Some(data_item) = existing_data_item {
-                        data_item
-                    } else {
-                        diesel::insert_into(data_items::table)
-                            .values(data_item::InsertFull {
-                                parent_item_id: Some(parent_dir_item.data_item.id),
-                                path_component: &lower_case_name,
-                            })
-                            .execute(&self.conn)?;
-
-                        data_items::table
-                            .filter(data_items::path_component.eq(lower_case_name))
-                            .filter(data_items::parent_item_id.eq(parent_dir_item.data_item.id))
-                            .first::<DataItem>(&self.conn)?
-                    };
+                    let new_data_item = self.ensure_data_item_exists(&lower_case_name, &parent_dir_item.data_item)?;
 
                     // Associate owner information with it (...or update an existing one, e.g.
                     // for a previously deleted item that still requires a deletion notice in the DB).
@@ -545,6 +531,181 @@ impl MetadataDB {
         })
     }
 
+    /// Syncs a local data item, i.e. updating its metadata, sync- and mod time.
+    /// The method implicitly keeps invariant in the DB, e.g. sets sync time to be
+    /// max(argument, current) and to update parent entries.
+    pub fn sync_local_data_item(&self, path: &RelativePath, target_item: &Item) -> Result<()> {
+        use self::schema::metadatas;
+        use self::schema::mod_times;
+        use self::schema::owner_informations;
+
+        // Any operation involving consistency of sync-time stamps and/or parent-child relations
+        // between items in the database requires a consistent view of the invariants held.
+        self.conn.transaction::<_, MetadataDBError, _>(|| {
+            let local_data_store = self.get_this_data_store()?;
+
+            // Look for parent item.
+            let mut items_path_to_target=
+                self.load_data_items_on_path(&local_data_store, &path)?;
+
+            if items_path_to_target.len() < path.get_path_components().len() - 1 {
+                // Something went wrong, we can not update an item that has no parent.
+                // We enforce this invariant even on syncs (at least announce the parent folder).
+                Err(MetadataDBError::ViolatesDBConsistency {
+                    message: "Must not insert data_item without existing parent item (i.e. no file without a parent folder)!"
+                })
+            } else {
+                let mut current_item_sync_time = VersionVector::new();
+                for mut parent_item in items_path_to_target.iter_mut() {
+                    self.load_sync_time_for_item(&mut parent_item)?;
+                    current_item_sync_time.max(&parent_item.sync_time.as_ref().unwrap());
+                }
+
+                let parent_dir_item = &items_path_to_target[items_path_to_target.len() - 2];
+                let lower_case_name = path.name().to_lowercase();
+
+                // FIXME: Do not allow non-deleted child items in folders that are deleted
+                if !parent_dir_item.owner_info.is_file {
+                    let new_data_item = self.ensure_data_item_exists(&lower_case_name, &parent_dir_item.data_item)?;
+
+                    // Associate owner information with it (...or update an existing one, e.g.
+                    // for a previously deleted item that still requires a deletion notice in the DB).
+                    let existing_owner_information = owner_informations::table
+                        .filter(owner_informations::data_item_id.eq(new_data_item.id))
+                        .filter(owner_informations::data_store_id.eq(local_data_store.id))
+                        .first::<OwnerInformation>(&self.conn)
+                        .optional()?;
+                    let new_owner_info = if let Some(owner_info) = existing_owner_information {
+                        let existing_item = items_path_to_target.last().unwrap();
+
+                        let item_will_be_deleted = !owner_info.is_deleted && target_item.is_deletion();
+                        let item_no_longer_folder = !owner_info.is_file && !target_item.is_folder();
+                        if  item_will_be_deleted || item_no_longer_folder {
+                            // In case a previous folder now is none-anymore, we need to clean out
+                            // all its children from the DB (completely remove them).
+                            self.delete_children_recursive(&existing_item, true)?;
+                        }
+
+                        // Remove un-needed entries for deleted items.
+                        if target_item.is_deletion() {
+                            // No need for modification times of deleted items.
+                            diesel::delete(mod_times::table)
+                                .filter(mod_times::owner_information_id.eq(existing_item.owner_info.id))
+                                .execute(&self.conn)?;
+                            // No need for metadata of deleted items.
+                            diesel::delete(metadatas::table)
+                                .filter(metadatas::owner_information_id.eq(existing_item.owner_info.id))
+                                .execute(&self.conn)?;
+                        }
+
+                        // Everything is ready to simply be 'synced up' with the target item.
+                        // This will also e.g. correctly setup the deletion status/folder status.
+                        diesel::update(owner_informations::table)
+                            .filter(owner_informations::id.eq(owner_info.id))
+                            .set((
+                                owner_informations::is_file.eq(target_item.is_file()),
+                                owner_informations::is_deleted.eq(target_item.is_deletion())
+                            )).execute(&self.conn)?;
+
+                        owner_info
+                    } else {
+                        // Nothing existed locally, just create the item as desired.
+                        diesel::insert_into(owner_informations::table)
+                            .values(owner_information::InsertFull {
+                                data_item_id: new_data_item.id,
+                                data_store_id: local_data_store.id,
+
+                                is_file: target_item.is_file(),
+                                is_deleted: target_item.is_deletion(),
+                            })
+                            .execute(&self.conn)?;
+
+                        owner_informations::table
+                            .filter(owner_informations::data_item_id.eq(new_data_item.id))
+                            .filter(owner_informations::data_store_id.eq(local_data_store.id))
+                            .first::<OwnerInformation>(&self.conn)?
+                    };
+
+                    // Simply set the mod_time entries.
+                    if !target_item.is_deletion() {
+                        self.update_mod_times(&new_owner_info, &target_item.mod_time(), true)?;
+                        self.update_parent_mod_times(&new_owner_info, true)?;
+                    }
+                    // For sync times we ALWAYS see what we already have in the DB, i.e. max it with
+                    // the given sync time to not loose information.
+                    let mut target_sync_time = current_item_sync_time;
+                    target_sync_time.max(&target_item.sync_time());
+                    self.update_sync_times(&new_owner_info, &target_sync_time, false)?;
+
+
+                    // Associate the metadata to the target if it's no deletion.
+                    if !target_item.is_deletion() {
+                        if let Some(metadata) = &target_item.metadata() {
+                            diesel::replace_into(metadatas::table)
+                                .values(metadata::InsertFull {
+                                    owner_information_id: new_owner_info.id,
+
+                                    creator_store_id: metadata.creator_store_id,
+                                    creator_store_time: metadata.creator_store_time,
+
+                                    case_sensitive_name: path.name(),
+                                    creation_time: metadata.creation_time,
+                                    mod_time: metadata.mod_time,
+                                    hash: &metadata.hash,
+                                })
+                                .execute(&self.conn)?;
+                        } else {
+                            diesel::delete(metadatas::table.filter(metadatas::owner_information_id.eq(new_owner_info.id))).execute(&self.conn)?;
+                        }
+
+                    }
+
+                    Ok(())
+                } else {
+                    // Something went wrong, files can not hold child-files (only folders can).
+                    // Again, we also enforce this during syncs. The sync algorithm itself should
+                    // make sure this does not happen.
+                    Err(MetadataDBError::ViolatesDBConsistency {
+                        message: "Must not insert data_item that has a file as a parent!"
+                    })
+                }
+            }
+
+        })
+    }
+
+    fn ensure_data_item_exists(
+        &self,
+        lower_case_name: &str,
+        parent: &DataItem,
+    ) -> Result<DataItem> {
+        use self::schema::data_items;
+
+        // Insert new data_item (...or keep existing one).
+        let existing_data_item = data_items::table
+            .filter(data_items::path_component.eq(lower_case_name))
+            .filter(data_items::parent_item_id.eq(parent.id))
+            .first::<DataItem>(&self.conn)
+            .optional()?;
+        let result_data_item = if let Some(data_item) = existing_data_item {
+            data_item
+        } else {
+            diesel::insert_into(data_items::table)
+                .values(data_item::InsertFull {
+                    parent_item_id: Some(parent.id),
+                    path_component: &lower_case_name,
+                })
+                .execute(&self.conn)?;
+
+            data_items::table
+                .filter(data_items::path_component.eq(lower_case_name))
+                .filter(data_items::parent_item_id.eq(parent.id))
+                .first::<DataItem>(&self.conn)?
+        };
+
+        Ok(result_data_item)
+    }
+
     pub fn delete_local_data_item(&self, path: &RelativePath) -> Result<usize> {
         // Any operation involving consistency of sync-time stamps and/or parent-child relations
         // between items in the database requires a consistent view of the invariants held.
@@ -559,12 +720,12 @@ impl MetadataDB {
                 // We have no parent item, i.e. this is already deleted.
                 Ok(0)
             } else {
-                let deleted = self.delete_item_recursive(&path_items.last().unwrap())?;
+                let deleted = self.delete_local_data_item_recursive(&path_items.last().unwrap())?;
                 Ok(deleted)
             }
         })
     }
-    fn delete_item_recursive(&self, item: &ItemInternal) -> Result<usize> {
+    fn delete_local_data_item_recursive(&self, item: &ItemInternal) -> Result<usize> {
         use self::schema::data_items;
         use self::schema::metadatas;
         use self::schema::mod_times;
@@ -582,7 +743,7 @@ impl MetadataDB {
 
             for (item, (owner_information, metadata)) in dir_entries {
                 let dir_entry = ItemInternal::from_join_tuple(item, owner_information, metadata);
-                deleted += self.delete_item_recursive(&dir_entry)?;
+                deleted += self.delete_local_data_item_recursive(&dir_entry)?;
             }
         }
 
@@ -602,6 +763,8 @@ impl MetadataDB {
             deleted += 1;
         }
 
+        // TODO: Pull this into clean-up procedure (as we e.g. might miss some of these clean ups
+        //       during a sync anyways and they should never cause issues besides wasted storage).
         // Remove un-needed entries
         // No need for modification times of deleted items.
         diesel::delete(mod_times::table)
@@ -613,6 +776,35 @@ impl MetadataDB {
             .execute(&self.conn)?;
 
         Ok(deleted)
+    }
+
+    fn delete_children_recursive(&self, item: &ItemInternal, is_top_item: bool) -> Result<()> {
+        use self::schema::data_items;
+        use self::schema::metadatas;
+        use self::schema::owner_informations;
+
+        // Make sure to delete children of folders recursively
+        if !item.owner_info.is_file {
+            let dir_entries = data_items::table
+                .filter(data_items::parent_item_id.eq(item.data_item.id))
+                .inner_join(owner_informations::table.left_join(metadatas::table))
+                .filter(owner_informations::data_store_id.eq(item.owner_info.data_store_id))
+                .load::<(DataItem, (OwnerInformation, Option<Metadata>))>(&self.conn)?;
+
+            for (item, (owner_information, metadata)) in dir_entries {
+                let dir_entry = ItemInternal::from_join_tuple(item, owner_information, metadata);
+                self.delete_children_recursive(&dir_entry, false)?;
+            }
+        }
+
+        if !is_top_item {
+            // For child items we remove everything from the DB (as it would be cleaned up anyways).
+            diesel::delete(owner_informations::table.find(item.owner_info.id))
+                .execute(&self.conn)?;
+            // Mod times, sync times and metadata should be deleted by cascade rules.
+        }
+
+        Ok(())
     }
 
     /// Converts a version vector indexed by data_store unique names to an local representation,
@@ -672,8 +864,8 @@ impl MetadataDB {
         mod_vector[&modifying_data_store.id] = modification_time;
 
         self.conn.transaction(|| {
-            self.update_mod_times(&owner_information, &mod_vector)?;
-            self.update_parent_mod_times(&owner_information)
+            self.update_mod_times(&owner_information, &mod_vector, false)?;
+            self.update_parent_mod_times(&owner_information, false)
         })?;
 
         Ok(())
@@ -681,17 +873,22 @@ impl MetadataDB {
 
     /// Updates the modification times of an DB entry by replacing all
     /// given vector time entries (represented by their data_store id).
-    ///
-    /// NOTE: Does currently only override other existing entries, but never
-    ///       deletes entries not mentioned in the given version vector.
     fn update_mod_times(
         &self,
         owner_information: &OwnerInformation,
-        mod_times: &VersionVector<i64>,
+        new_mod_times: &VersionVector<i64>,
+        delete_existing: bool,
     ) -> Result<()> {
         use self::schema::mod_times;
 
-        let new_db_entries: Vec<_> = mod_times
+        if delete_existing {
+            diesel::delete(
+                mod_times::table.filter(mod_times::owner_information_id.eq(owner_information.id)),
+            )
+            .execute(&self.conn)?;
+        }
+
+        let new_db_entries: Vec<_> = new_mod_times
             .iter()
             .map(|(data_store_id, time)| mod_time::InsertFull {
                 owner_information_id: owner_information.id,
@@ -701,6 +898,39 @@ impl MetadataDB {
             .collect();
 
         diesel::replace_into(mod_times::table)
+            .values(new_db_entries)
+            .execute(&self.conn)?;
+
+        Ok(())
+    }
+
+    /// Updates the sync times of an DB entry by replacing all
+    /// given vector time entries (represented by their data_store id).
+    fn update_sync_times(
+        &self,
+        owner_information: &OwnerInformation,
+        new_sync_times: &VersionVector<i64>,
+        delete_existing: bool,
+    ) -> Result<()> {
+        use self::schema::sync_times;
+
+        if delete_existing {
+            diesel::delete(
+                sync_times::table.filter(sync_times::owner_information_id.eq(owner_information.id)),
+            )
+            .execute(&self.conn)?;
+        }
+
+        let new_db_entries: Vec<_> = new_sync_times
+            .iter()
+            .map(|(data_store_id, time)| sync_time::InsertFull {
+                owner_information_id: owner_information.id,
+                data_store_id: data_store_id.clone(),
+                time: time.clone(),
+            })
+            .collect();
+
+        diesel::replace_into(sync_times::table)
             .values(new_db_entries)
             .execute(&self.conn)?;
 
@@ -758,7 +988,11 @@ impl MetadataDB {
 
     /// Updates the modification times of all the given owner_information's parent
     /// data_items to include the given time in their MAX(children) modification time.
-    fn update_parent_mod_times(&self, owner_information: &OwnerInformation) -> Result<()> {
+    fn update_parent_mod_times(
+        &self,
+        owner_information: &OwnerInformation,
+        delete_existing: bool,
+    ) -> Result<()> {
         use self::schema::data_items;
         use self::schema::owner_informations;
 
@@ -786,7 +1020,11 @@ impl MetadataDB {
                 break;
             }
             current_mod_vector.max(&parent_mod_vector);
-            self.update_mod_times(&parent_owner_information, &current_mod_vector)?;
+            self.update_mod_times(
+                &parent_owner_information,
+                &current_mod_vector,
+                delete_existing,
+            )?;
 
             // Recurse up one directory
             current_item_id = parent_item_id;
@@ -872,21 +1110,30 @@ mod tests {
 
     fn insert_sample_data_set(metadata_store: &MetadataDB) -> (DataSet, DataStore) {
         let data_set = metadata_store.create_data_set("abc").unwrap();
-        let data_store = metadata_store
+        let data_store = insert_data_store(&metadata_store, &data_set, "abc", true);
+
+        (data_set, data_store)
+    }
+
+    fn insert_data_store(
+        metadata_store: &MetadataDB,
+        data_set: &DataSet,
+        unique_name: &str,
+        this_store: bool,
+    ) -> DataStore {
+        metadata_store
             .create_data_store(&data_store::InsertFull {
                 data_set_id: data_set.id,
-                unique_name: &"abc",
-                human_name: &"abc",
-                is_this_store: true,
+                unique_name: &unique_name,
+                human_name: &"",
+                is_this_store: this_store,
                 time: 0,
 
                 creation_date: &NaiveDateTime::from_timestamp(0, 0),
                 path_on_device: &"/",
                 location_note: &"",
             })
-            .unwrap();
-
-        (data_set, data_store)
+            .unwrap()
     }
 
     fn insert_data_item(metadata_store: &MetadataDB, name: &str, is_file: bool) {
@@ -1020,6 +1267,109 @@ mod tests {
         assert_mod_time(&metadata_store, "sub", data_store.id, 8);
 
         // TODO: Clean up deletion notices and re-query child items!
+    }
+
+    #[test]
+    fn correctly_inserts_synced_data_items() {
+        // We use our usual local, sample data set and store and create an additional remote one.
+        let metadata_store = open_metadata_store();
+        let (data_set, local_data_store) = insert_sample_data_set(&metadata_store);
+        let remote_data_store = insert_data_store(&metadata_store, &data_set, "remote", false);
+
+        // Insert some sample items (/sub/folder/file)
+        insert_data_item(&metadata_store, "sub", false);
+        insert_data_item(&metadata_store, "sub/folder", false);
+        insert_data_item(&metadata_store, "sub/folder/file", true);
+
+        // Let's query an item, change it and re-synchronize it into our local db
+        let mut file_item = metadata_store
+            .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+            .unwrap();
+
+        // ...this should be as if the second store overwrites the local one with a new version.
+        let new_mod_time = VersionVector::from_initial_values(vec![(&remote_data_store.id, 42)]);
+        let new_sync_time = VersionVector::from_initial_values(vec![(&remote_data_store.id, 1024)]);
+        file_item.content = ItemType::FILE {
+            metadata: file_item.metadata().clone(),
+            mod_time: new_mod_time,
+            sync_time: new_sync_time,
+        };
+
+        metadata_store
+            .sync_local_data_item(&RelativePath::from_path("sub/folder/file"), &file_item)
+            .unwrap();
+
+        // Check if the synced item looks right.
+        let file_item_after_update = metadata_store
+            .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+            .unwrap();
+        assert_eq!(file_item_after_update.sync_time()[&local_data_store.id], 4);
+        assert_eq!(
+            file_item_after_update.sync_time()[&remote_data_store.id],
+            1024
+        );
+        assert_eq!(file_item_after_update.mod_time()[&local_data_store.id], 0);
+        assert_eq!(file_item_after_update.mod_time()[&remote_data_store.id], 42);
+
+        // Try a more complicated case where we change a folder to be a file
+        let mut folder_item = metadata_store
+            .get_local_data_item(&RelativePath::from_path("sub/folder"))
+            .unwrap();
+
+        let new_sync_time = VersionVector::from_initial_values(vec![(&remote_data_store.id, 2048)]);
+        folder_item.content = ItemType::FILE {
+            metadata: folder_item.metadata().clone(),
+            mod_time: folder_item.mod_time().clone(),
+            sync_time: new_sync_time,
+        };
+
+        metadata_store
+            .sync_local_data_item(&RelativePath::from_path("sub/folder"), &folder_item)
+            .unwrap();
+
+        // We expect the file below to be implicitly deleted and have the appropriate sync time.
+        let file_item_after_update = metadata_store
+            .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+            .unwrap();
+        assert!(file_item_after_update.is_deletion());
+        assert_eq!(
+            file_item_after_update.sync_time()[&remote_data_store.id],
+            2048
+        );
+
+        // Another interesting case is if we receive a single deletion notice.
+        let mut root_item = metadata_store
+            .get_local_data_item(&RelativePath::from_path(""))
+            .unwrap();
+
+        let new_sync_time = VersionVector::from_initial_values(vec![(&remote_data_store.id, 4096)]);
+        root_item.content = ItemType::DELETION {
+            sync_time: new_sync_time,
+        };
+
+        metadata_store
+            .sync_local_data_item(&RelativePath::from_path("sub/folder"), &root_item)
+            .unwrap();
+
+        let root_item_after_update = metadata_store
+            .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+            .unwrap();
+        assert!(root_item_after_update.is_deletion());
+        assert_eq!(
+            root_item_after_update.sync_time()[&remote_data_store.id],
+            4096,
+        );
+        let file_item_after_update = metadata_store
+            .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+            .unwrap();
+        assert!(file_item_after_update.is_deletion());
+        assert_eq!(
+            file_item_after_update.sync_time()[&remote_data_store.id],
+            4096,
+        );
+
+        // TODO: Add more comprehensive tests for sync actions.
+        //       We postpone this after we implement some of the actual sync logic.
     }
 
     #[test]
