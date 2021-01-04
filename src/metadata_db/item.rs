@@ -47,7 +47,28 @@ impl Item {
         match &self.content {
             ItemType::FILE { mod_time, .. } => mod_time,
             ItemType::FOLDER { mod_time, .. } => mod_time,
-            _ => panic!("Must not query mod_time of deletion notice!"),
+            ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
+        }
+    }
+
+    pub fn creation_time(&self) -> VersionVector<i64> {
+        match &self.content {
+            ItemType::FILE {
+                metadata: Some(metadata),
+                ..
+            } => VersionVector::from_initial_values(vec![(
+                &metadata.creator_store_id,
+                metadata.creator_store_time,
+            )]),
+            ItemType::FOLDER {
+                metadata: Some(metadata),
+                ..
+            } => VersionVector::from_initial_values(vec![(
+                &metadata.creator_store_id,
+                metadata.creator_store_time,
+            )]),
+            ItemType::DELETION { .. } => panic!("Must not query creation time of deletion notice!"),
+            _ => panic!("Must not query metadata on items that do not have it loaded."),
         }
     }
 

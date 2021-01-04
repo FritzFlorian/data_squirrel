@@ -119,11 +119,17 @@ impl FS for InMemoryFS {
             Err(io::Error::from(io::ErrorKind::NotFound))
         }
     }
-    fn update_metadata<P: AsRef<Path>>(&self, path: P, metadata: &Metadata) -> io::Result<()> {
+    fn update_metadata<P: AsRef<Path>>(
+        &self,
+        path: P,
+        mod_time: FileTime,
+        read_only: bool,
+    ) -> io::Result<()> {
         let path = self.canonicalize(path)?;
 
         if let Some(item) = self.items.borrow_mut().deref_mut().get_mut(&path) {
-            item.metadata = metadata.clone();
+            item.metadata.last_mod_time = mod_time;
+            item.metadata.read_only = read_only;
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))

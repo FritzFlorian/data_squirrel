@@ -107,6 +107,7 @@ impl MetadataDB {
     pub fn create_data_store(&self, new_store: &data_store::InsertFull) -> Result<DataStore> {
         use self::schema::data_items;
         use self::schema::data_stores;
+        use self::schema::metadatas;
         use self::schema::owner_informations;
         use diesel::dsl::*;
 
@@ -154,9 +155,24 @@ impl MetadataDB {
                         is_deleted: false,
                     })
                     .execute(&self.conn)?;
+                let root_owner_information = owner_informations::table
+                    .filter(owner_informations::data_item_id.eq(root_data_item.id))
+                    .filter(owner_informations::data_store_id.eq(result.id))
+                    .first::<OwnerInformation>(&self.conn)?;
+                diesel::insert_into(metadatas::table)
+                    .values(metadata::InsertFull {
+                        owner_information_id: root_owner_information.id,
+
+                        creator_store_id: result.id,
+                        creator_store_time: 0,
+                        case_sensitive_name: "",
+                        creation_time: chrono::NaiveDateTime::from_timestamp(0, 0),
+                        mod_time: chrono::NaiveDateTime::from_timestamp(0, 0),
+                        hash: "",
+                    })
+                    .execute(&self.conn)?;
                 // It's fine that we DO NOT assign any mod or sync time.
                 // It implicitly defaults to all 0's, which is actually correct before any scan.
-                self.increase_local_time()?;
             }
 
             Ok(result)
@@ -423,9 +439,9 @@ impl MetadataDB {
         // between items in the database requires a consistent view of the invariants held.
         self.conn.transaction::<_, MetadataDBError, _>(|| {
             // We insert an item, bump the data stores version and mark all events with the version.
+            self.increase_local_time()?;
             let local_data_store = self.get_this_data_store()?;
             let new_time = local_data_store.time;
-            self.increase_local_time()?;
 
             // Look for parent item.
             let parent_dir_path = path.parent();
@@ -565,7 +581,7 @@ impl MetadataDB {
                     current_item_sync_time.max(&parent_item.sync_time.as_ref().unwrap());
                 }
 
-                let parent_dir_item = &items_path_to_target[items_path_to_target.len() - 2];
+                let parent_dir_item = &items_path_to_target[path.get_path_components().len() - 2];
                 let lower_case_name = path.name().to_lowercase();
 
                 // FIXME: Do not allow non-deleted child items in folders that are deleted
@@ -608,7 +624,7 @@ impl MetadataDB {
                             .filter(owner_informations::id.eq(owner_info.id))
                             .set((
                                 owner_informations::is_file.eq(target_item.is_file()),
-                                owner_informations::is_deleted.eq(target_item.is_deletion())
+                                owner_informations::is_deleted.eq(target_item.is_deletion()),
                             )).execute(&self.conn)?;
 
                         owner_info
@@ -676,6 +692,85 @@ impl MetadataDB {
             }
 
         })
+    }
+
+    /// Sets the sync time of the given path (and all child paths) to be the maximum of their
+    /// current sync time and the given version vector.
+    pub fn max_sync_times_recursive(
+        &self,
+        path: &RelativePath,
+        sync_time: &VersionVector<i64>,
+    ) -> Result<()> {
+        // Any operation involving consistency of sync-time stamps and/or parent-child relations
+        // between items in the database requires a consistent view of the invariants held.
+        self.conn.transaction::<_, MetadataDBError, _>(|| {
+            let local_data_store = self.get_this_data_store()?;
+
+            // Look for parent item.
+            let mut items_path_to_target =
+                self.load_data_items_on_path(&local_data_store, &path)?;
+
+            if items_path_to_target.len() < path.get_path_components().len() {
+                // In case this is an implicit deletion, we try to create it with the new time.
+                if items_path_to_target.len() < path.get_path_components().len() - 1 {
+                    Err(MetadataDBError::ViolatesDBConsistency {
+                        message: "Must not update sync times of non existing db entries!",
+                    })
+                } else {
+                    let local_item = self.get_local_data_item(&path)?;
+                    self.sync_local_data_item(
+                        &path,
+                        &Item {
+                            path_component: path.name().to_owned(),
+                            content: ItemType::DELETION {
+                                sync_time: local_item.sync_time().clone(),
+                            },
+                        },
+                    )?;
+                    Ok(())
+                }
+            } else {
+                self.max_sync_times_recursive_internal(
+                    items_path_to_target.pop().unwrap(),
+                    &sync_time,
+                )
+            }
+        })
+    }
+    fn max_sync_times_recursive_internal(
+        &self,
+        mut item: ItemInternal,
+        sync_time: &VersionVector<i64>,
+    ) -> Result<()> {
+        use self::schema::data_items;
+        use self::schema::metadatas;
+        use self::schema::owner_informations;
+
+        if !item.owner_info.is_file {
+            // Search all child entries...
+            let dir_entries = data_items::table
+                .filter(data_items::parent_item_id.eq(item.data_item.id))
+                .inner_join(owner_informations::table.left_join(metadatas::table))
+                .filter(owner_informations::data_store_id.eq(item.owner_info.data_store_id))
+                .load::<(DataItem, (OwnerInformation, Option<Metadata>))>(&self.conn)?;
+
+            // ...and also update their sync times.
+            let child_results: Result<Vec<_>> = dir_entries
+                .into_iter()
+                .map(|(item, (owner_information, metadata))| {
+                    ItemInternal::from_join_tuple(item, owner_information, metadata)
+                })
+                .map(|dir_item| self.max_sync_times_recursive_internal(dir_item, &sync_time))
+                .collect();
+            child_results?;
+        }
+
+        self.load_sync_time_for_item(&mut item)?;
+        let mut max_sync_time = item.sync_time.as_ref().unwrap().clone();
+        max_sync_time.max(&sync_time);
+        self.update_sync_times(&item.owner_info, &max_sync_time, false)?;
+
+        Ok(())
     }
 
     fn ensure_data_item_exists(
@@ -759,9 +854,9 @@ impl MetadataDB {
                 .set(owner_informations::is_deleted.eq(true))
                 .execute(&self.conn)?;
 
+            self.increase_local_time()?;
             let local_data_store = self.get_this_data_store()?;
             let new_time = local_data_store.time;
-            self.increase_local_time()?;
             self.add_mod_event(&item.owner_info, &local_data_store, new_time)?;
 
             deleted += 1;
@@ -929,8 +1024,8 @@ impl MetadataDB {
             .iter()
             .map(|(data_store_id, time)| sync_time::InsertFull {
                 owner_information_id: owner_information.id,
-                data_store_id: data_store_id.clone(),
-                time: time.clone(),
+                data_store_id: *data_store_id,
+                time: *time,
             })
             .collect();
 
@@ -1178,6 +1273,16 @@ mod tests {
             } => panic!("Must not check mod times on deletions"),
         };
     }
+    fn assert_sync_time(metadata_store: &MetadataDB, name: &str, key: i64, value: i64) {
+        let item = metadata_store
+            .get_data_item(
+                &metadata_store.get_this_data_store().unwrap(),
+                &RelativePath::from_path(name),
+            )
+            .unwrap();
+        let sync_time = item.sync_time();
+        assert_eq!(sync_time[&key], value);
+    }
 
     #[test]
     fn insert_and_query_data_set() {
@@ -1285,6 +1390,31 @@ mod tests {
         insert_data_item(&metadata_store, "sub/folder", false);
         insert_data_item(&metadata_store, "sub/folder/file", true);
 
+        // First of, lets try bumping some synchronization vector times.
+        let sync_time = VersionVector::from_initial_values(vec![(&remote_data_store.id, 10)]);
+        metadata_store
+            .max_sync_times_recursive(&RelativePath::from_path("sub"), &sync_time)
+            .unwrap();
+        assert_sync_time(&metadata_store, "", remote_data_store.id, 0);
+        assert_sync_time(&metadata_store, "sub", remote_data_store.id, 10);
+        assert_sync_time(&metadata_store, "sub/folder/file", remote_data_store.id, 10);
+
+        // Also try to 'partially' bump the sync times.
+        let sync_time = VersionVector::from_initial_values(vec![
+            (&local_data_store.id, 5),
+            (&remote_data_store.id, 7),
+        ]);
+        metadata_store
+            .max_sync_times_recursive(&RelativePath::from_path(""), &sync_time)
+            .unwrap();
+        assert_sync_time(&metadata_store, "", remote_data_store.id, 7);
+        assert_sync_time(&metadata_store, "sub", remote_data_store.id, 10);
+        assert_sync_time(&metadata_store, "sub/folder/file", remote_data_store.id, 10);
+
+        assert_sync_time(&metadata_store, "", local_data_store.id, 5);
+        assert_sync_time(&metadata_store, "sub", local_data_store.id, 5);
+        assert_sync_time(&metadata_store, "sub/folder/file", local_data_store.id, 5);
+
         // Let's query an item, change it and re-synchronize it into our local db
         let mut file_item = metadata_store
             .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
@@ -1307,13 +1437,18 @@ mod tests {
         let file_item_after_update = metadata_store
             .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
             .unwrap();
-        assert_eq!(file_item_after_update.sync_time()[&local_data_store.id], 4);
+        assert_eq!(file_item_after_update.sync_time()[&local_data_store.id], 5);
         assert_eq!(
             file_item_after_update.sync_time()[&remote_data_store.id],
             1024
         );
         assert_eq!(file_item_after_update.mod_time()[&local_data_store.id], 0);
         assert_eq!(file_item_after_update.mod_time()[&remote_data_store.id], 42);
+        let root_item_after_update = metadata_store
+            .get_local_data_item(&RelativePath::from_path(""))
+            .unwrap();
+        assert_eq!(root_item_after_update.mod_time()[&local_data_store.id], 3);
+        assert_eq!(root_item_after_update.mod_time()[&remote_data_store.id], 42);
 
         // Try a more complicated case where we change a folder to be a file
         let mut folder_item = metadata_store
@@ -1371,9 +1506,6 @@ mod tests {
             file_item_after_update.sync_time()[&remote_data_store.id],
             4096,
         );
-
-        // TODO: Add more comprehensive tests for sync actions.
-        //       We postpone this after we implement some of the actual sync logic.
     }
 
     #[test]

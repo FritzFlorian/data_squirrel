@@ -15,7 +15,12 @@ pub trait FS: Clone {
 
     fn canonicalize<P: AsRef<Path>>(&self, path: P) -> io::Result<PathBuf>;
     fn metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata>;
-    fn update_metadata<P: AsRef<Path>>(&self, path: P, metadata: &Metadata) -> io::Result<()>;
+    fn update_metadata<P: AsRef<Path>>(
+        &self,
+        path: P,
+        mod_time: FileTime,
+        read_only: bool,
+    ) -> io::Result<()>;
 
     fn create_dir<P: AsRef<Path>>(&self, path: P, ignore_existing: bool) -> io::Result<()>;
     fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
@@ -38,6 +43,7 @@ pub trait FS: Clone {
 
 /// Represents a single entry in a directory.
 /// Has the bare minimum information it needs attached to it.
+#[derive(Debug, PartialEq)]
 pub struct DirEntry {
     pub file_name: OsString,
 }

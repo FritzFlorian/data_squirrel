@@ -45,6 +45,7 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
                 is_this_store       INTEGER NOT NULL,
                 time                INTEGER NOT NULL,
 
+                UNIQUE(unique_name),
                 FOREIGN KEY(data_set_id)    REFERENCES data_sets(id)
              )",
     )

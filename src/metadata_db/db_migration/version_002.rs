@@ -27,16 +27,14 @@ fn create_index_owner_information(conn: &SqliteConnection) -> Result<()> {
 
 // Allow for quick searches of mod time entries
 fn create_index_mod_times_owner_information(conn: &SqliteConnection) -> Result<()> {
-    sql_query("CREATE UNIQUE INDEX mod_times_owner_information ON mod_times(owner_information_id)")
+    sql_query("CREATE INDEX mod_times_owner_information ON mod_times(owner_information_id)")
         .execute(conn)?;
     Ok(())
 }
 
 // Allow for quick searches of sync time entries
 fn create_index_sync_times_owner_information(conn: &SqliteConnection) -> Result<()> {
-    sql_query(
-        "CREATE UNIQUE INDEX sync_times_owner_information ON sync_times(owner_information_id)",
-    )
-    .execute(conn)?;
+    sql_query("CREATE INDEX sync_times_owner_information ON sync_times(owner_information_id)")
+        .execute(conn)?;
     Ok(())
 }

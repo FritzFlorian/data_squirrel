@@ -38,10 +38,12 @@ pub enum SyncUpdateContent {
     Deletion,
     File {
         mod_time: SyncVersionVector,
+        creation_time: SyncVersionVector,
         metadata: metadata_db::Metadata,
     },
     Folder {
         mod_time: SyncVersionVector,
+        creation_time: SyncVersionVector,
         metadata: metadata_db::Metadata,
         child_items: Vec<String>,
     },

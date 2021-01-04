@@ -3,6 +3,7 @@ pub mod relative_path;
 pub mod virtual_fs;
 use self::relative_path::*;
 
+use filetime::FileTime;
 use ring::digest::{Context, Digest, SHA256};
 use std::error::Error;
 use std::fmt;
@@ -226,10 +227,12 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
     pub fn set_metadata(
         &self,
         relative_path: &RelativePath,
-        metadata: &virtual_fs::Metadata,
+        mod_time: FileTime,
+        read_only: bool,
     ) -> Result<()> {
         let absolute_path = self.root_path.join(&relative_path.to_path_buf());
-        self.fs.update_metadata(&absolute_path, &metadata)?;
+        self.fs
+            .update_metadata(&absolute_path, mod_time, read_only)?;
 
         Ok(())
     }
@@ -257,13 +260,25 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         }
     }
 
+    pub fn create_file(&self, relative_path: &RelativePath) -> Result<()> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+        self.fs.create_file(&absolute_path)?;
+
+        Ok(())
+    }
     pub fn delete_file(&self, relative_path: &RelativePath) -> Result<()> {
         let absolute_path = self.root_path.join(&relative_path.to_path_buf());
-        self.fs.remove_dir(&absolute_path)?;
+        self.fs.remove_file(&absolute_path)?;
 
         Ok(())
     }
 
+    pub fn create_dir(&self, relative_path: &RelativePath) -> Result<()> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+        self.fs.create_dir(&absolute_path, false)?;
+
+        Ok(())
+    }
     pub fn delete_directory(&self, relative_path: &RelativePath) -> Result<()> {
         let absolute_path = self.root_path.join(&relative_path.to_path_buf());
         self.fs.remove_dir(&absolute_path)?;
@@ -282,6 +297,22 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         self.fs.rename(&absolute_source_path, &absolute_dest_path)?;
 
         Ok(())
+    }
+
+    pub fn read_file(&self, relative_path: &RelativePath) -> Result<Box<dyn io::Read>> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+
+        Ok(self.fs.read_file(&absolute_path)?)
+    }
+
+    pub fn write_file(
+        &self,
+        relative_path: &RelativePath,
+        data: Box<dyn io::Read>,
+    ) -> Result<usize> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+
+        Ok(self.fs.write_file(&absolute_path, data)?)
     }
 
     fn is_reserved_name(&self, file_name: &str) -> bool {
@@ -591,25 +622,18 @@ mod tests {
             .unwrap();
 
         // ...change it...
-        let mut new_file_metadata = file_metadata;
-        new_file_metadata.set_last_mod_time(FileTime::from_unix_time(
-            10 + new_file_metadata.last_mod_time().unix_seconds(),
-            0,
-        ));
-        new_file_metadata.set_read_only(true);
+        let new_mod_time =
+            FileTime::from_unix_time(10 + file_metadata.last_mod_time().unix_seconds(), 0);
         data_store
-            .set_metadata(&RelativePath::from_path("file"), &new_file_metadata)
+            .set_metadata(&RelativePath::from_path("file"), new_mod_time, true)
             .unwrap();
 
         // ...re-load and test it.
         let file_metadata = data_store
             .metadata(&RelativePath::from_path("file"))
             .unwrap();
-        assert_eq!(file_metadata.read_only(), new_file_metadata.read_only());
-        assert_eq!(
-            file_metadata.last_mod_time(),
-            new_file_metadata.last_mod_time()
-        );
+        assert_eq!(file_metadata.read_only(), true);
+        assert_eq!(file_metadata.last_mod_time(), new_mod_time,);
     }
 
     #[test]

@@ -29,11 +29,16 @@ impl FS for WrapperFS {
                 .unwrap(),
         })
     }
-    fn update_metadata<P: AsRef<Path>>(&self, path: P, metadata: &Metadata) -> io::Result<()> {
-        filetime::set_file_mtime(&path, metadata.last_mod_time)?;
+    fn update_metadata<P: AsRef<Path>>(
+        &self,
+        path: P,
+        mod_time: FileTime,
+        read_only: bool,
+    ) -> io::Result<()> {
+        filetime::set_file_mtime(&path, mod_time)?;
 
         let mut target_permissions = fs::symlink_metadata(&path)?.permissions();
-        target_permissions.set_readonly(metadata.read_only);
+        target_permissions.set_readonly(read_only);
         fs::set_permissions(&path, target_permissions)?;
 
         Ok(())
