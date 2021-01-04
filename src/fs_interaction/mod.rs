@@ -58,6 +58,8 @@ pub type DefaultFSInteraction = FSInteraction<virtual_fs::WrapperFS>;
 const METADATA_DIR: &str = ".__data_squirrel__";
 const METADATA_DB_FILE: &str = "database.sqlite";
 const LOCK_FILE: &str = "lock";
+const PENDING_FILES_DIR: &str = "pending_files";
+const SNAPSHOT_DIR: &str = "snapshots";
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Implementation
@@ -81,6 +83,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             root_path: data_store_root,
             locked: false,
         };
+        result.create_metadata_directories()?;
         result.acquire_exclusive_lock()?;
 
         Ok(result)
@@ -108,7 +111,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         let data_store_root = virtual_fs.canonicalize(data_store_root)?;
         // Create Metadata Directory (fail on io-errors or if it already exists).
         let metadata_path = data_store_root.join(METADATA_DIR);
-        match virtual_fs.create_dir(&metadata_path) {
+        match virtual_fs.create_dir(&metadata_path, false) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(FSInteractionError::AlreadyExists);
             }
@@ -220,6 +223,17 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         Ok(result)
     }
 
+    pub fn set_metadata(
+        &self,
+        relative_path: &RelativePath,
+        metadata: &virtual_fs::Metadata,
+    ) -> Result<()> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+        self.fs.update_metadata(&absolute_path, &metadata)?;
+
+        Ok(())
+    }
+
     fn load_metadata(&self, data_item: &mut DataItem) {
         // Loading metadata from the os can fail, however, we do not see this as failing
         // to provide the data_item. We simply mark any conflicts we encounter.
@@ -243,10 +257,45 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         }
     }
 
+    pub fn delete_file(&self, relative_path: &RelativePath) -> Result<()> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+        self.fs.remove_dir(&absolute_path)?;
+
+        Ok(())
+    }
+
+    pub fn delete_directory(&self, relative_path: &RelativePath) -> Result<()> {
+        let absolute_path = self.root_path.join(&relative_path.to_path_buf());
+        self.fs.remove_dir(&absolute_path)?;
+
+        Ok(())
+    }
+
+    pub fn rename_file_or_directory(
+        &self,
+        source_path: &RelativePath,
+        dest_path: &RelativePath,
+    ) -> Result<()> {
+        let absolute_source_path = self.root_path.join(&source_path.to_path_buf());
+        let absolute_dest_path = self.root_path.join(&dest_path.to_path_buf());
+
+        self.fs.rename(&absolute_source_path, &absolute_dest_path)?;
+
+        Ok(())
+    }
+
     fn is_reserved_name(&self, file_name: &str) -> bool {
         // Currently we only skip the metadata dir, however,
         // we might want to add special marker files later on.
         file_name.eq(METADATA_DIR)
+    }
+
+    // Ensures all metadata directories exist.
+    fn create_metadata_directories(&self) -> Result<()> {
+        self.fs.create_dir(self.pending_files_dir(), true)?;
+        self.fs.create_dir(self.snapshot_dir(), true)?;
+
+        Ok(())
     }
 
     // Creates the lock dot-file.
@@ -289,6 +338,26 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
     fn lock_path(&self) -> PathBuf {
         self.metadata_path().join(LOCK_FILE)
     }
+
+    pub fn pending_files_dir(&self) -> PathBuf {
+        self.metadata_path().join(PENDING_FILES_DIR)
+    }
+
+    pub fn snapshot_dir(&self) -> PathBuf {
+        self.metadata_path().join(SNAPSHOT_DIR)
+    }
+
+    pub fn pending_files_relative(&self) -> RelativePath {
+        RelativePath::from_path("")
+            .join_mut(METADATA_DIR.to_string())
+            .join_mut(PENDING_FILES_DIR.to_string())
+    }
+
+    pub fn snapshot_relative(&self) -> RelativePath {
+        RelativePath::from_path("")
+            .join(METADATA_DIR.to_string())
+            .join(SNAPSHOT_DIR.to_string())
+    }
 }
 
 impl<FS: virtual_fs::FS> Drop for FSInteraction<FS> {
@@ -317,6 +386,7 @@ pub enum Issue {
 mod tests {
     use self::virtual_fs::{InMemoryFS, FS};
     use super::*;
+    use filetime::FileTime;
     use std::fs;
 
     #[test]
@@ -332,6 +402,22 @@ mod tests {
         assert!(
             test_dir.path().join(METADATA_DIR).is_dir(),
             "Must have created a special data_squirrel metadata folder."
+        );
+        assert!(
+            test_dir
+                .path()
+                .join(METADATA_DIR)
+                .join(PENDING_FILES_DIR)
+                .is_dir(),
+            "Must have created a special metadata/pending_files folder."
+        );
+        assert!(
+            test_dir
+                .path()
+                .join(METADATA_DIR)
+                .join(SNAPSHOT_DIR)
+                .is_dir(),
+            "Must have created a special metadata/snapshots folder."
         );
     }
 
@@ -419,11 +505,11 @@ mod tests {
     fn detects_duplicates() {
         // Create some test content
         let test_fs = InMemoryFS::default();
-        test_fs.create_dir(&PathBuf::from("/AbC")).unwrap();
-        test_fs.create_dir(&PathBuf::from("/aBc")).unwrap();
+        test_fs.create_dir(&PathBuf::from("/AbC"), false).unwrap();
+        test_fs.create_dir(&PathBuf::from("/aBc"), false).unwrap();
         test_fs.create_file(&PathBuf::from("/abC")).unwrap();
 
-        test_fs.create_dir(&PathBuf::from("/other")).unwrap();
+        test_fs.create_dir(&PathBuf::from("/other"), false).unwrap();
         test_fs.create_file(&PathBuf::from("/file")).unwrap();
 
         let data_store =
@@ -479,5 +565,92 @@ mod tests {
                 .as_ref(),
             HASH_B
         );
+    }
+
+    #[test]
+    fn modifies_data_correctly_in_memory() {
+        modifies_data_correctly::<virtual_fs::InMemoryFS>(&PathBuf::new());
+    }
+
+    #[test]
+    fn modifies_data_correctly_wrapper() {
+        let test_dir = tempfile::tempdir().unwrap();
+        modifies_data_correctly::<virtual_fs::WrapperFS>(test_dir.path());
+    }
+
+    fn modifies_data_correctly<FS: virtual_fs::FS>(root_dir: &Path) {
+        // Create some test content
+        let test_fs = FS::default();
+        test_fs.create_file(&root_dir.join("file")).unwrap();
+
+        let data_store = FSInteraction::<FS>::create_with_fs(&root_dir, test_fs).unwrap();
+
+        // Query metadata...
+        let file_metadata = data_store
+            .metadata(&RelativePath::from_path("file"))
+            .unwrap();
+
+        // ...change it...
+        let mut new_file_metadata = file_metadata;
+        new_file_metadata.set_last_mod_time(FileTime::from_unix_time(
+            10 + new_file_metadata.last_mod_time().unix_seconds(),
+            0,
+        ));
+        new_file_metadata.set_read_only(true);
+        data_store
+            .set_metadata(&RelativePath::from_path("file"), &new_file_metadata)
+            .unwrap();
+
+        // ...re-load and test it.
+        let file_metadata = data_store
+            .metadata(&RelativePath::from_path("file"))
+            .unwrap();
+        assert_eq!(file_metadata.read_only(), new_file_metadata.read_only());
+        assert_eq!(
+            file_metadata.last_mod_time(),
+            new_file_metadata.last_mod_time()
+        );
+    }
+
+    #[test]
+    fn moves_data_correctly_in_memory() {
+        moves_data_correctly::<virtual_fs::InMemoryFS>(&PathBuf::new());
+    }
+
+    #[test]
+    fn moves_data_correctly_wrapper() {
+        let test_dir = tempfile::tempdir().unwrap();
+        moves_data_correctly::<virtual_fs::WrapperFS>(test_dir.path());
+    }
+
+    fn moves_data_correctly<FS: virtual_fs::FS>(root_dir: &Path) {
+        // Create some test content
+        let test_fs = FS::default();
+        test_fs.create_dir(&root_dir.join("dir"), false).unwrap();
+        test_fs.create_file(&root_dir.join("dir/file")).unwrap();
+
+        let data_store = FSInteraction::<FS>::create_with_fs(&root_dir, test_fs.clone()).unwrap();
+
+        data_store
+            .rename_file_or_directory(
+                &RelativePath::from_path("dir"),
+                &RelativePath::from_path("new-dir"),
+            )
+            .unwrap();
+        let root_entries = test_fs.list_dir(&root_dir).unwrap();
+        root_entries.iter().any(|item| item.file_name == "new-dir");
+        assert_eq!(root_entries.len(), 2);
+        assert!(root_entries.iter().any(|item| item.file_name == "new-dir"));
+
+        data_store
+            .rename_file_or_directory(
+                &RelativePath::from_path("new-dir/file"),
+                &RelativePath::from_path("file"),
+            )
+            .unwrap();
+        let root_entries = test_fs.list_dir(&root_dir).unwrap();
+        assert_eq!(root_entries.len(), 3);
+        assert!(root_entries.iter().any(|item| item.file_name == "new-dir"));
+        assert!(root_entries.iter().any(|item| item.file_name == "file"));
     }
 }

@@ -2,6 +2,7 @@ use super::*;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
@@ -118,13 +119,27 @@ impl FS for InMemoryFS {
             Err(io::Error::from(io::ErrorKind::NotFound))
         }
     }
+    fn update_metadata<P: AsRef<Path>>(&self, path: P, metadata: &Metadata) -> io::Result<()> {
+        let path = self.canonicalize(path)?;
 
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        if let Some(item) = self.items.borrow_mut().deref_mut().get_mut(&path) {
+            item.metadata = metadata.clone();
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+
+    fn create_dir<P: AsRef<Path>>(&self, path: P, ignore_existing: bool) -> io::Result<()> {
         let path = self.canonicalize(path)?;
 
         if self.is_root(&path) || self.parent_exists(&path) {
             if self.items.borrow_mut().deref().contains_key(&path) {
-                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+                if ignore_existing {
+                    return Ok(());
+                } else {
+                    return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+                }
             }
 
             self.items
@@ -204,11 +219,71 @@ impl FS for InMemoryFS {
         Ok(())
     }
 
+    fn rename<P1: AsRef<Path>, P2: AsRef<Path>>(
+        &self,
+        source_path: P1,
+        dest_path: P2,
+    ) -> io::Result<()> {
+        let source_path = self.canonicalize(source_path)?;
+        let dest_path = self.canonicalize(dest_path)?;
+
+        let source_parent_exists = self.is_root(&source_path) || self.parent_exists(&source_path);
+        let dest_parent_exists = self.is_root(&dest_path) || self.parent_exists(&dest_path);
+
+        if source_parent_exists && dest_parent_exists {
+            if self.items.borrow_mut().deref().contains_key(&dest_path) {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            if !self.items.borrow_mut().deref().contains_key(&source_path) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+
+            let matching_paths: Vec<_> = self
+                .items
+                .borrow_mut()
+                .iter()
+                .filter(|(path, _)| path.starts_with(&source_path))
+                .map(|(path, _)| path.to_owned())
+                .collect();
+            for matching_path in matching_paths {
+                let mut child_item = self.items.borrow_mut().remove(&matching_path).unwrap();
+
+                let postfix = child_item.path.strip_prefix(&source_path).unwrap();
+                let new_path = dest_path.join(postfix);
+
+                child_item.path = new_path.clone();
+                self.items
+                    .borrow_mut()
+                    .deref_mut()
+                    .insert(new_path, child_item);
+            }
+        } else {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+
+        Ok(())
+    }
+
     fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>> {
         let path = self.canonicalize(path)?;
 
         if let Some(item) = self.items.borrow_mut().get(&path) {
             Ok(Box::new(std::io::Cursor::new(item.data.clone())))
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+    fn write_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+        mut data: Box<dyn io::Read>,
+    ) -> io::Result<usize> {
+        let path = self.canonicalize(path)?;
+
+        if let Some(item) = self.items.borrow_mut().get_mut(&path) {
+            item.data.clear();
+            let bytes_written = data.read_to_end(&mut item.data)?;
+            Ok(bytes_written)
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
         }

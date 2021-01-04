@@ -15,16 +15,24 @@ pub trait FS: Clone {
 
     fn canonicalize<P: AsRef<Path>>(&self, path: P) -> io::Result<PathBuf>;
     fn metadata<P: AsRef<Path>>(&self, path: P) -> io::Result<Metadata>;
+    fn update_metadata<P: AsRef<Path>>(&self, path: P, metadata: &Metadata) -> io::Result<()>;
 
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
+    fn create_dir<P: AsRef<Path>>(&self, path: P, ignore_existing: bool) -> io::Result<()>;
     fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>>;
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
 
-    fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>>;
+    /// Renames a file or folder. The destination_path must not exist already.
+    fn rename<P1: AsRef<Path>, P2: AsRef<Path>>(
+        &self,
+        source_path: P1,
+        dest_path: P2,
+    ) -> io::Result<()>;
 
+    fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>>;
+    fn write_file<P: AsRef<Path>>(&self, path: P, data: Box<dyn io::Read>) -> io::Result<usize>;
     fn db_access_type(&self) -> DBAccessType;
 }
 
@@ -63,6 +71,13 @@ impl Metadata {
     pub fn creation_time(&self) -> FileTime {
         self.creation_time
     }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+    pub fn set_last_mod_time(&mut self, last_mod_time: FileTime) {
+        self.last_mod_time = last_mod_time;
+    }
 }
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum FileType {
@@ -91,3 +106,4 @@ pub use self::wrapper_fs::WrapperFS;
 mod in_memory_fs;
 pub use self::in_memory_fs::InMemoryFS;
 use std::ffi::OsString;
+use std::io::BufReader;
