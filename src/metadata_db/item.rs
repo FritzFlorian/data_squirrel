@@ -1,33 +1,64 @@
-use metadata_db::Metadata;
+use super::DataItem;
+use super::Metadata;
+use super::OwnerInformation;
+
 use version_vector::VersionVector;
 
+/// DB-Internal representation of an entry loaded from the DB.
+/// Depending on the synchronization/deletion status, this might,
+/// e.g. not have any metadata assigned to it.
+/// The 'defining' factor for an db entry to be valid is that we have an owner information.
 pub struct ItemInternal {
-    pub data_item: super::DataItem,
-    pub owner_info: super::OwnerInformation,
-    pub metadata: Option<super::Metadata>,
+    pub data_item: DataItem,
+    pub owner_info: OwnerInformation,
+    pub metadata: Option<Metadata>,
     pub mod_time: Option<VersionVector<i64>>,
     pub sync_time: Option<VersionVector<i64>>,
 }
+impl ItemInternal {
+    pub fn from_db_query(item: DataItem, owner: OwnerInformation, meta: Option<Metadata>) -> Self {
+        Self {
+            data_item: item,
+            owner_info: owner,
+            metadata: meta,
+            mod_time: None,
+            sync_time: None,
+        }
+    }
+}
 
+// Represents a local item stored in the DB.
+// We ONLY return this to external actors in a fully loaded state.
+#[derive(Clone)]
 pub struct Item {
     pub path_component: String,
+    pub sync_time: VersionVector<i64>,
+
     pub content: ItemType,
-    // TODO: add ignore/sync status
+    // TODO: add ignore status
 }
+#[derive(Clone)]
 pub enum ItemType {
+    DELETION,
     FILE {
-        metadata: Option<super::Metadata>,
-        mod_time: VersionVector<i64>,
-        sync_time: VersionVector<i64>,
+        metadata: ItemFSMetadata,
+        creation_time: VersionVector<i64>,
+        last_mod_time: VersionVector<i64>,
     },
     FOLDER {
-        metadata: Option<super::Metadata>,
-        mod_time: VersionVector<i64>,
-        sync_time: VersionVector<i64>,
+        metadata: ItemFSMetadata,
+        creation_time: VersionVector<i64>,
+        last_mod_time: VersionVector<i64>,
+
+        max_mod_time: VersionVector<i64>,
     },
-    DELETION {
-        sync_time: VersionVector<i64>,
-    },
+}
+#[derive(Clone)]
+pub struct ItemFSMetadata {
+    pub case_sensitive_name: String,
+    pub creation_time: chrono::NaiveDateTime,
+    pub mod_time: chrono::NaiveDateTime,
+    pub hash: String,
 }
 
 impl Item {
@@ -43,64 +74,49 @@ impl Item {
         matches!(self.content, ItemType::FOLDER{ .. })
     }
 
-    pub fn mod_time(&self) -> &VersionVector<i64> {
+    pub fn last_mod_time(&self) -> &VersionVector<i64> {
         match &self.content {
-            ItemType::FILE { mod_time, .. } => mod_time,
-            ItemType::FOLDER { mod_time, .. } => mod_time,
+            ItemType::FILE { last_mod_time, .. } => last_mod_time,
+            ItemType::FOLDER { last_mod_time, .. } => last_mod_time,
             ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
         }
     }
 
-    pub fn creation_time(&self) -> VersionVector<i64> {
+    pub fn max_mod_time(&self) -> &VersionVector<i64> {
         match &self.content {
-            ItemType::FILE {
-                metadata: Some(metadata),
-                ..
-            } => VersionVector::from_initial_values(vec![(
-                &metadata.creator_store_id,
-                metadata.creator_store_time,
-            )]),
-            ItemType::FOLDER {
-                metadata: Some(metadata),
-                ..
-            } => VersionVector::from_initial_values(vec![(
-                &metadata.creator_store_id,
-                metadata.creator_store_time,
-            )]),
+            ItemType::FILE { last_mod_time, .. } => last_mod_time,
+            ItemType::FOLDER { max_mod_time, .. } => max_mod_time,
+            ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
+        }
+    }
+
+    pub fn creation_time(&self) -> &VersionVector<i64> {
+        match &self.content {
+            ItemType::FILE { creation_time, .. } => creation_time,
+            ItemType::FOLDER { creation_time, .. } => creation_time,
             ItemType::DELETION { .. } => panic!("Must not query creation time of deletion notice!"),
-            _ => panic!("Must not query metadata on items that do not have it loaded."),
         }
     }
 
-    pub fn sync_time(&self) -> &VersionVector<i64> {
-        match &self.content {
-            ItemType::FILE { sync_time, .. } => sync_time,
-            ItemType::FOLDER { sync_time, .. } => sync_time,
-            ItemType::DELETION { sync_time, .. } => sync_time,
-        }
+    pub fn creation_store_id(&self) -> i64 {
+        *self.creation_time().iter().next().as_ref().unwrap().0
+    }
+    pub fn creation_store_time(&self) -> i64 {
+        *self.creation_time().iter().next().as_ref().unwrap().1
     }
 
-    pub fn metadata(&self) -> &Option<Metadata> {
+    pub fn metadata(&self) -> &ItemFSMetadata {
         match &self.content {
             ItemType::FILE { metadata, .. } => metadata,
             ItemType::FOLDER { metadata, .. } => metadata,
             _ => panic!("Must not query metadata of deletion notice!"),
         }
     }
-}
-
-impl ItemInternal {
-    pub fn from_join_tuple(
-        item: super::DataItem,
-        owner: super::OwnerInformation,
-        meta: Option<super::Metadata>,
-    ) -> Self {
-        Self {
-            data_item: item,
-            owner_info: owner,
-            metadata: meta,
-            mod_time: None,
-            sync_time: None,
+    pub fn metadata_mut(&mut self) -> &mut ItemFSMetadata {
+        match &mut self.content {
+            ItemType::FILE { metadata, .. } => metadata,
+            ItemType::FOLDER { metadata, .. } => metadata,
+            _ => panic!("Must not query metadata of deletion notice!"),
         }
     }
 }

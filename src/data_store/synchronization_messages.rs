@@ -1,6 +1,8 @@
 use crate::version_vector::VersionVector;
 use fs_interaction::relative_path::RelativePath;
+
 use metadata_db;
+use metadata_db::ItemFSMetadata;
 use metadata_db::MetadataDB;
 
 // TODO: In general, if we really push this protocol over the network later on optimize out all
@@ -49,13 +51,13 @@ pub enum ExtSyncContent {
         mod_time: SyncVersionVector,
         creation_time: SyncVersionVector,
 
-        fs_metadata: SyncFSMetadata,
+        fs_metadata: ItemFSMetadata,
     },
     Folder {
         mod_time: SyncVersionVector,
         creation_time: SyncVersionVector,
 
-        fs_metadata: SyncFSMetadata,
+        fs_metadata: ItemFSMetadata,
         child_items: Vec<String>,
     },
 }
@@ -74,37 +76,15 @@ pub enum IntSyncContent {
         mod_time: VersionVector<i64>,
         creation_time: VersionVector<i64>,
 
-        fs_metadata: SyncFSMetadata,
+        fs_metadata: ItemFSMetadata,
     },
     Folder {
         mod_time: VersionVector<i64>,
         creation_time: VersionVector<i64>,
 
-        fs_metadata: SyncFSMetadata,
+        fs_metadata: ItemFSMetadata,
         child_items: Vec<String>,
     },
-}
-
-/// Metadata regarding the actual state of files/folders on disk involved in a sync.
-pub struct SyncFSMetadata {
-    pub case_sensitive_name: String,
-
-    pub creation_time: chrono::NaiveDateTime,
-    pub mod_time: chrono::NaiveDateTime,
-
-    pub hash: String,
-}
-impl SyncFSMetadata {
-    pub fn from_db_metadata(fs_metadata: metadata_db::Metadata) -> Self {
-        Self {
-            case_sensitive_name: fs_metadata.case_sensitive_name,
-
-            creation_time: fs_metadata.creation_time,
-            mod_time: fs_metadata.mod_time,
-
-            hash: fs_metadata.hash,
-        }
-    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
