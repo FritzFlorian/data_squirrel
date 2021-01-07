@@ -165,7 +165,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 sync_time: local_item.sync_time,
                 action: IntSyncAction::UpdateRequired(IntSyncContent::Deletion),
             })
-        } else if local_item.max_mod_time() <= &sync_request.item_sync_time {
+        } else if local_item.mod_time() <= &sync_request.item_sync_time {
             Ok(IntSyncResponse {
                 sync_time: local_item.sync_time,
                 action: IntSyncAction::UpToDate,
@@ -186,7 +186,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     }),
                 }),
                 metadata_db::ItemType::FOLDER {
-                    max_mod_time: local_mod_time,
+                    mod_time: local_mod_time,
                     metadata: local_metadata,
                     creation_time: local_creation_time,
                     ..
@@ -307,7 +307,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 .max_sync_times_recursive(&path, &sync_response.sync_time)?;
                         } else if local_item.creation_time() <= &sync_response.sync_time {
                             // The remote deletion notice is targeting our local file/folder.
-                            if local_item.max_mod_time() <= &sync_response.sync_time {
+                            if local_item.mod_time() <= &sync_response.sync_time {
                                 // The remote deletion notice knows of all our changes.
                                 // Delete the actual item on disk...
                                 if local_item.is_file() {
@@ -317,7 +317,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 }
 
                                 // ...and insert the appropriate deletion notice into our local db.
-                                let target_item = metadata_db::Item {
+                                let target_item = metadata_db::DBItem {
                                     path_component: path.name().to_owned(),
                                     sync_time: sync_response.sync_time.clone(),
 
@@ -348,7 +348,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         {
                             panic!("Detected sync-conflict!");
                         } else if local_item.is_deletion()
-                            || local_item.max_mod_time() <= &sync_response.sync_time
+                            || local_item.mod_time() <= &sync_response.sync_time
                         {
                             // The remote is newer and knows all of our local changes,
                             // thus we can safely take the remote file version.
@@ -378,7 +378,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 .rename_file_or_directory(&tmp_file_path, &path)?;
 
                             // Insert the appropriate file item into our local db.
-                            let target_item = metadata_db::Item {
+                            let target_item = metadata_db::DBItem {
                                 path_component: path.name().to_owned(),
                                 sync_time: sync_response.sync_time,
                                 content: metadata_db::ItemType::FILE {
@@ -425,19 +425,17 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                     false,
                                 )?;
 
-                                let existing_mod_time = if local_item.is_file() {
-                                    local_item.max_mod_time().clone()
-                                } else {
-                                    VersionVector::new()
-                                };
-                                let folder_before_sync = metadata_db::Item {
+                                // FIXME: Handle conflicts between folders, deletions and files.
+                                //        Also ook into how is the creator of a file when
+                                //        we perform a sync!
+                                let folder_before_sync = metadata_db::DBItem {
                                     path_component: path.name().to_owned(),
                                     sync_time: local_item.sync_time,
                                     content: metadata_db::ItemType::FOLDER {
                                         metadata: response_metadata.clone(),
                                         creation_time: response_creation_time.clone(),
-                                        last_mod_time: existing_mod_time,
-                                        max_mod_time: VersionVector::new(),
+                                        last_mod_time: response_creation_time.clone(),
+                                        mod_time: VersionVector::new(),
                                     },
                                 };
                                 self.db_access
@@ -471,7 +469,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         // FIXME: it is simply not good to differentiate between root and
                         //        non-root folders in our code...
                         if path.get_path_components().len() > 1 {
-                            let folder_after_sync = metadata_db::Item {
+                            let folder_after_sync = metadata_db::DBItem {
                                 path_component: path.name().to_owned(),
                                 sync_time: sync_response.sync_time,
                                 content: metadata_db::ItemType::FOLDER {
@@ -481,7 +479,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                     //        differentiate between single, last mod and max mod
                                     //        held in folders.
                                     last_mod_time: response_mod_time.clone(),
-                                    max_mod_time: response_mod_time,
+                                    mod_time: response_mod_time,
                                 },
                             };
                             self.db_access
@@ -551,7 +549,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
         let db_item = self.db_access.get_local_data_item(&path)?;
         match db_item {
-            metadata_db::Item {
+            metadata_db::DBItem {
                 content: metadata_db::ItemType::FILE { .. },
                 ..
             } => {
@@ -568,7 +566,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     "",
                 )?;
             }
-            metadata_db::Item {
+            metadata_db::DBItem {
                 content: metadata_db::ItemType::FOLDER { metadata, .. },
                 ..
             } => {
@@ -585,7 +583,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     )?;
                 }
             }
-            metadata_db::Item {
+            metadata_db::DBItem {
                 content: metadata_db::ItemType::DELETION { .. },
                 ..
             } => {
@@ -618,7 +616,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
         let db_item = self.db_access.get_local_data_item(path)?;
         match db_item {
-            metadata_db::Item {
+            metadata_db::DBItem {
                 content: metadata_db::ItemType::FILE { metadata, .. },
                 ..
             } => {
@@ -649,14 +647,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     }
                 }
             }
-            metadata_db::Item {
+            metadata_db::DBItem {
                 content: metadata_db::ItemType::FOLDER { .. },
                 ..
             } => {
                 // FIXME: Handle if a folder is changed to be a file.
                 panic!("Changing folders to files is not supported!");
             }
-            metadata_db::Item {
+            metadata_db::DBItem {
                 content: metadata_db::ItemType::DELETION { .. },
                 ..
             } => {

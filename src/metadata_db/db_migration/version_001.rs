@@ -3,9 +3,13 @@ use super::*;
 pub fn migrate(conn: &SqliteConnection) -> Result<()> {
     create_table_data_sets(&conn)?;
     create_table_data_stores(&conn)?;
-    create_table_data_items(&conn)?;
-    create_table_owner_informations(&conn)?;
-    create_table_metadatas(&conn)?;
+
+    create_table_path_components(&conn)?;
+    create_table_item(&conn)?;
+
+    create_table_file_system_metadatas(&conn)?;
+    create_table_mod_metadatas(&conn)?;
+
     create_table_mod_times(&conn)?;
     create_table_sync_times(&conn)?;
 
@@ -54,21 +58,18 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
     Ok(())
 }
 
-// An individual data item is a folder or file contained in a data_set.
-// Each data_item is uniquely identified by its initial, physical data_store it was
-// created in (a pair of creator_store_id and creator_version time stamp).
-//
-// Data_items form a tree like structure by defining their parent_item_id.
-fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
+// An individual path_component is an item of a folder/directory structure.
+// Path_components form a tree like structure by defining their parent_item_id.
+fn create_table_path_components(conn: &SqliteConnection) -> Result<()> {
     sql_query(
-        "CREATE TABLE data_items(
+        "CREATE TABLE path_components(
                 id                  INTEGER PRIMARY KEY NOT NULL,
                 
-                parent_item_id      INTEGER,
-                path_component      TEXT NOT NULL,
+                parent_component_id      INTEGER,
+                path_component           TEXT NOT NULL,
 
-                UNIQUE(path_component, parent_item_id),
-                FOREIGN KEY(parent_item_id)     REFERENCES data_items(id)
+                UNIQUE(path_component, parent_component_id),
+                FOREIGN KEY(parent_component_id)     REFERENCES path_components(id)
             )",
     )
     .execute(conn)?;
@@ -76,33 +77,26 @@ fn create_table_data_items(conn: &SqliteConnection) -> Result<()> {
     Ok(())
 }
 
-// Data_items have no notion of modification/sync times and no metadata, which in turn must be
-// tailored to what each individual data_store knows about them.
-//
-// To fill this gap, the owner_information can associate this information to a data_item.
-// Each owner_information represents the knowledge that we know something about this data item
-// from the perspective of a given data store.
-//
-// For the 'classic' sync algorithm we only need our own information (i.e. the information
-// associated with the data_store this database belonging to this physical location).
-// For 'eagerly' sending data to remote sites it is important to also keep some information
-// about them. This can very depending on the use-case (might be user configurable later on)
-// and can therefore range from enough information to know that we might need to send data to a
-// site up to all information about the other site.
-fn create_table_owner_informations(conn: &SqliteConnection) -> Result<()> {
+// An item represents actual knowledge of what is stored on the filesystem.
+// Is associated a raw 'path' (in form of a path_component, which is part of a directory tree)
+// with metadata required to perform synchronization.
+// For the 'classic' vector pair algorithm we only need item's for our local data_store,
+// however, we allow to also keep information about other data_store's items, to e.g. allow
+// synchronization to non-reachable targets later on.
+fn create_table_item(conn: &SqliteConnection) -> Result<()> {
     sql_query(
-        "CREATE TABLE owner_informations(
-                id              INTEGER PRIMARY KEY NOT NULL,
+        "CREATE TABLE items(
+                id                  INTEGER PRIMARY KEY NOT NULL,
 
-                data_store_id   INTEGER NOT NULL,
-                data_item_id    INTEGER NOT NULL,
+                data_store_id       INTEGER NOT NULL,
+                path_component_id   INTEGER NOT NULL,
 
-                is_file                 INTEGER NOT NULL,
-                is_deleted              INTEGER NOT NULL,
+                is_file             INTEGER NOT NULL,
+                is_deleted          INTEGER NOT NULL,
 
-                UNIQUE(data_store_id, data_item_id),
+                UNIQUE(data_store_id, path_component_id),
                 FOREIGN KEY(data_store_id)      REFERENCES data_stores(id),
-                FOREIGN KEY(data_item_id)       REFERENCES data_items(id)
+                FOREIGN KEY(path_component_id)  REFERENCES path_components(id)
             )",
     )
     .execute(conn)?;
@@ -110,26 +104,38 @@ fn create_table_owner_informations(conn: &SqliteConnection) -> Result<()> {
     Ok(())
 }
 
-// Metadata associated to a data item from the view of a specific data store.
-// Usually, we will only keep information on our local data_store, as this is required for
-// detecting local updates. However, in some use cases we might want to communicate other
-// metadata, thus also keep it.
-fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
+// File system related metadata associated to a data item.
+fn create_table_file_system_metadatas(conn: &SqliteConnection) -> Result<()> {
     sql_query(
-        "CREATE TABLE metadatas(
+        "CREATE TABLE file_system_metadatas(
                 id                      INTEGER PRIMARY KEY NOT NULL,
-                owner_information_id    INTEGER NOT NULL,
                 
-                creator_store_id    INTEGER NOT NULL,
-                creator_store_time        INTEGER NOT NULL,
-
                 case_sensitive_name     TEXT NOT NULL,
                 creation_time           TEXT NOT NULL,
                 mod_time                TEXT NOT NULL,
                 hash                    TEXT NOT NULL,
     
-                UNIQUE(owner_information_id, creator_store_id, creator_store_time),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id)   ON DELETE CASCADE
+                FOREIGN KEY(id)   REFERENCES items(id)   ON DELETE CASCADE
+            )",
+    )
+    .execute(conn)?;
+
+    Ok(())
+}
+
+// Metadata related to the modification of a data item.
+fn create_table_mod_metadatas(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE mod_metadatas(
+                id                      INTEGER PRIMARY KEY NOT NULL,
+                
+                creator_store_id        INTEGER NOT NULL,
+                creator_store_time      INTEGER NOT NULL,
+
+                last_mod_store_id       INTEGER NOT NULL,
+                last_mod_store_time     INTEGER NOT NULL,
+    
+                FOREIGN KEY(id)   REFERENCES items(id)   ON DELETE CASCADE
             )",
     )
     .execute(conn)?;
@@ -144,16 +150,16 @@ fn create_table_metadatas(conn: &SqliteConnection) -> Result<()> {
 fn create_table_mod_times(conn: &SqliteConnection) -> Result<()> {
     sql_query(
         "CREATE TABLE mod_times(
-                id                      INTEGER PRIMARY KEY NOT NULL,
+                id                  INTEGER PRIMARY KEY NOT NULL,
                 
-                owner_information_id    INTEGER NOT NULL,
+                mod_metadata_id     INTEGER NOT NULL,
                 
-                data_store_id           INTEGER NOT NULL,
-                time                    INTEGER NOT NULL,
+                data_store_id       INTEGER NOT NULL,
+                time                INTEGER NOT NULL,
 
-                UNIQUE(owner_information_id, data_store_id),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id)   ON DELETE CASCADE,
-                FOREIGN KEY(data_store_id)          REFERENCES data_stores(id) 
+                UNIQUE(mod_metadata_id, data_store_id),
+                FOREIGN KEY(mod_metadata_id)   REFERENCES mod_metadatas(id)   ON DELETE CASCADE,
+                FOREIGN KEY(data_store_id)     REFERENCES data_stores(id) 
             )",
     )
     .execute(conn)?;
@@ -163,21 +169,21 @@ fn create_table_mod_times(conn: &SqliteConnection) -> Result<()> {
 
 // Stores a synchronization time of a file from the view of a specific owner,
 // i.e. it encodes the information of the form:
-// "data_item from the view of owner_information has synchronization time stamp
-//  data_store -> time (the time the data_item was synchronized most recently with the data_store)"
+// "the item has the synchronization time stamp data_store -> time
+//  (the time the data_item was synchronized most recently with the data_store)"
 fn create_table_sync_times(conn: &SqliteConnection) -> Result<()> {
     sql_query(
         "CREATE TABLE sync_times(
-                id                      INTEGER PRIMARY KEY NOT NULL,
+                id                  INTEGER PRIMARY KEY NOT NULL,
                 
-                owner_information_id    INTEGER NOT NULL,
+                item_id             INTEGER NOT NULL,
                 
-                data_store_id           INTEGER NOT NULL,
-                time                    INTEGER NOT NULL,
+                data_store_id       INTEGER NOT NULL,
+                time                INTEGER NOT NULL,
 
-                UNIQUE(owner_information_id, data_store_id),
-                FOREIGN KEY(owner_information_id)   REFERENCES owner_informations(id)   ON DELETE CASCADE,
-                FOREIGN KEY(data_store_id)          REFERENCES data_stores(id)
+                UNIQUE(item_id, data_store_id),
+                FOREIGN KEY(item_id)            REFERENCES items(id)   ON DELETE CASCADE,
+                FOREIGN KEY(data_store_id)      REFERENCES data_stores(id)
             )",
     )
     .execute(conn)?;

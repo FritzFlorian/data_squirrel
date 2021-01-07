@@ -47,6 +47,10 @@ impl RelativePath {
         &self.path_components
     }
 
+    pub fn path_component_number(&self) -> usize {
+        self.path_components.len()
+    }
+
     pub fn join(&self, component: String) -> RelativePath {
         self.clone().join_mut(component)
     }

@@ -4,7 +4,7 @@ use super::schema::mod_times;
 pub struct ModTime {
     pub id: i64,
 
-    pub owner_information_id: i64,
+    pub mod_metadata_id: i64,
 
     pub data_store_id: i64,
     pub time: i64,
@@ -13,7 +13,7 @@ pub struct ModTime {
 #[derive(Insertable)]
 #[table_name = "mod_times"]
 pub struct InsertFull {
-    pub owner_information_id: i64,
+    pub mod_metadata_id: i64,
 
     pub data_store_id: i64,
     pub time: i64,

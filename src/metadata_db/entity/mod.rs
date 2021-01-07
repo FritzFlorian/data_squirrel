@@ -1,16 +1,18 @@
 use super::schema;
 
 // Basic entity mappings on database tables (Should be mostly 1:1 copies of our schema and helpers).
-pub mod data_item;
-pub use self::data_item::DataItem;
+pub mod path_component;
+pub use self::path_component::PathComponent;
 pub mod data_set;
 pub use self::data_set::DataSet;
 pub mod data_store;
 pub use self::data_store::DataStore;
-pub mod metadata;
-pub use self::metadata::Metadata;
-pub mod owner_information;
-pub use self::owner_information::OwnerInformation;
+pub mod file_system_metadata;
+pub use self::file_system_metadata::FileSystemMetadata;
+pub mod mod_metadata;
+pub use self::mod_metadata::ModMetadata;
+pub mod item;
+pub use self::item::Item;
 pub mod mod_time;
 pub use self::mod_time::ModTime;
 pub mod sync_time;

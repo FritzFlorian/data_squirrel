@@ -1,21 +1,21 @@
-use super::schema::owner_informations;
+use super::schema::items;
 
-#[derive(Debug, Queryable)]
-pub struct OwnerInformation {
+#[derive(Debug, Queryable, Clone)]
+pub struct Item {
     pub id: i64,
 
     pub data_store_id: i64,
-    pub data_item_id: i64,
+    pub path_component_id: i64,
 
     pub is_file: bool,
     pub is_deleted: bool,
 }
 
 #[derive(Insertable)]
-#[table_name = "owner_informations"]
+#[table_name = "items"]
 pub struct InsertFull {
     pub data_store_id: i64,
-    pub data_item_id: i64,
+    pub path_component_id: i64,
 
     pub is_file: bool,
     pub is_deleted: bool,

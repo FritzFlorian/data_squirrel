@@ -1,12 +1,8 @@
-use super::schema::metadatas;
+use super::schema::file_system_metadatas;
 
 #[derive(Debug, Queryable, Clone)]
-pub struct Metadata {
+pub struct FileSystemMetadata {
     pub id: i64,
-    pub owner_information_id: i64,
-
-    pub creator_store_id: i64,
-    pub creator_store_time: i64,
 
     pub case_sensitive_name: String,
     pub creation_time: chrono::NaiveDateTime,
@@ -15,12 +11,9 @@ pub struct Metadata {
 }
 
 #[derive(Insertable)]
-#[table_name = "metadatas"]
+#[table_name = "file_system_metadatas"]
 pub struct InsertFull<'a> {
-    pub owner_information_id: i64,
-
-    pub creator_store_id: i64,
-    pub creator_store_time: i64,
+    pub id: i64,
 
     pub case_sensitive_name: &'a str,
     pub creation_time: chrono::NaiveDateTime,
@@ -29,7 +22,7 @@ pub struct InsertFull<'a> {
 }
 
 #[derive(AsChangeset)]
-#[table_name = "metadatas"]
+#[table_name = "file_system_metadatas"]
 pub struct UpdateMetadata<'a> {
     pub case_sensitive_name: &'a str,
     pub creation_time: &'a chrono::NaiveDateTime,

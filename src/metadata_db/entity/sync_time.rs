@@ -4,7 +4,7 @@ use super::schema::sync_times;
 pub struct SyncTime {
     pub id: i64,
 
-    pub owner_information_id: i64,
+    pub item_id: i64,
 
     pub data_store_id: i64,
     pub time: i64,
@@ -13,7 +13,7 @@ pub struct SyncTime {
 #[derive(Insertable)]
 #[table_name = "sync_times"]
 pub struct InsertFull {
-    pub owner_information_id: i64,
+    pub item_id: i64,
 
     pub data_store_id: i64,
     pub time: i64,

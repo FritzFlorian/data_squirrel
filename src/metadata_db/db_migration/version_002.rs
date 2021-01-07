@@ -1,40 +1,40 @@
 use super::*;
 
 pub fn migrate(conn: &SqliteConnection) -> Result<()> {
-    create_index_data_item_path(&conn)?;
-    create_index_owner_information(&conn)?;
-    create_index_mod_times_owner_information(&conn)?;
-    create_index_sync_times_owner_information(&conn)?;
+    create_index_path_components(&conn)?;
+    create_index_item(&conn)?;
+    create_index_mod_times_mod_metadata(&conn)?;
+    create_index_sync_times_item(&conn)?;
 
     Ok(())
 }
 
 // Creates an index to search for data items based on their path.
 // This is the main search we might do in our DB and thus worth speeding up.
-fn create_index_data_item_path(conn: &SqliteConnection) -> Result<()> {
+fn create_index_path_components(conn: &SqliteConnection) -> Result<()> {
     sql_query(
-        "CREATE UNIQUE INDEX data_item_path_idx ON data_items(path_component, parent_item_id)",
+        "CREATE UNIQUE INDEX path_components_idx ON path_components(path_component, parent_component_id)",
     )
     .execute(conn)?;
     Ok(())
 }
 
-// Creates an index to search for owner informations (fast search by data_item_id and data_store_id).
-fn create_index_owner_information(conn: &SqliteConnection) -> Result<()> {
-    sql_query("CREATE UNIQUE INDEX owner_information_data_store ON owner_informations(data_item_id, data_store_id)").execute(conn)?;
+// Creates an index to search for items (fast search by path_component_id and data_store_id).
+fn create_index_item(conn: &SqliteConnection) -> Result<()> {
+    sql_query("CREATE UNIQUE INDEX item_path_component ON items(path_component_id, data_store_id)")
+        .execute(conn)?;
     Ok(())
 }
 
 // Allow for quick searches of mod time entries
-fn create_index_mod_times_owner_information(conn: &SqliteConnection) -> Result<()> {
-    sql_query("CREATE INDEX mod_times_owner_information ON mod_times(owner_information_id)")
+fn create_index_mod_times_mod_metadata(conn: &SqliteConnection) -> Result<()> {
+    sql_query("CREATE INDEX mod_times_mod_metadatas ON mod_times(mod_metadata_id)")
         .execute(conn)?;
     Ok(())
 }
 
 // Allow for quick searches of sync time entries
-fn create_index_sync_times_owner_information(conn: &SqliteConnection) -> Result<()> {
-    sql_query("CREATE INDEX sync_times_owner_information ON sync_times(owner_information_id)")
-        .execute(conn)?;
+fn create_index_sync_times_item(conn: &SqliteConnection) -> Result<()> {
+    sql_query("CREATE INDEX sync_times_item ON sync_times(item_id)").execute(conn)?;
     Ok(())
 }

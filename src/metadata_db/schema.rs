@@ -23,20 +23,20 @@ table! {
 }
 
 table! {
-    data_items (id) {
+    path_components (id) {
         id -> BigInt,
 
-        parent_item_id -> Nullable<BigInt>,
+        parent_component_id -> Nullable<BigInt>,
         path_component -> Text,
     }
 }
 
 table! {
-    owner_informations (id) {
+    items (id) {
         id -> BigInt,
 
         data_store_id -> BigInt,
-        data_item_id -> BigInt,
+        path_component_id -> BigInt,
 
         is_file -> Bool,
         is_deleted -> Bool,
@@ -44,12 +44,8 @@ table! {
 }
 
 table! {
-    metadatas (id) {
+    file_system_metadatas (id) {
         id -> BigInt,
-        owner_information_id -> BigInt,
-
-        creator_store_id -> BigInt,
-        creator_store_time -> BigInt,
 
         case_sensitive_name -> Text,
         creation_time -> Timestamp,
@@ -59,9 +55,21 @@ table! {
 }
 
 table! {
+    mod_metadatas (id) {
+        id -> BigInt,
+
+        creator_store_id -> BigInt,
+        creator_store_time -> BigInt,
+
+        last_mod_store_id -> BigInt,
+        last_mod_store_time -> BigInt,
+    }
+}
+
+table! {
     mod_times (id) {
         id -> BigInt,
-        owner_information_id -> BigInt,
+        mod_metadata_id -> BigInt,
         data_store_id -> BigInt,
         time -> BigInt,
     }
@@ -70,27 +78,34 @@ table! {
 table! {
     sync_times (id) {
         id -> BigInt,
-        owner_information_id -> BigInt,
+        item_id -> BigInt,
         data_store_id -> BigInt,
         time -> BigInt,
     }
 }
 
 allow_tables_to_appear_in_same_query!(
-    data_items,
+    path_components,
     data_sets,
     data_stores,
-    metadatas,
+    file_system_metadatas,
+    mod_metadatas,
     mod_times,
-    owner_informations,
+    items,
     sync_times,
 );
 
 joinable!(data_stores -> data_sets(data_set_id));
-// Can not use implicit self joins for data_items -> parent_item_id
-joinable!(owner_informations -> data_stores(data_store_id));
-joinable!(owner_informations -> data_items(data_item_id));
-joinable!(metadatas -> owner_informations(owner_information_id));
-joinable!(metadatas -> data_stores(creator_store_id));
-joinable!(mod_times -> owner_informations(owner_information_id));
-joinable!(sync_times -> owner_informations(owner_information_id));
+
+joinable!(items -> data_stores(data_store_id));
+joinable!(items -> path_components(path_component_id));
+
+joinable!(file_system_metadatas -> items(id));
+
+joinable!(mod_metadatas -> items(id));
+// Must be done with explicit joins, as both reference the same other table.
+joinable!(mod_metadatas -> data_stores(last_mod_store_id));
+// joinable!(mod_metadatas -> data_stores(creator_store_id));
+
+joinable!(mod_times -> mod_metadatas(mod_metadata_id));
+joinable!(sync_times -> items(item_id));

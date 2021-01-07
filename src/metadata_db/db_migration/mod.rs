@@ -144,9 +144,10 @@ mod tests {
         let table_names = query_table_names(&conn);
         assert!(table_names.contains(&"data_sets".to_string()));
         assert!(table_names.contains(&"data_stores".to_string()));
-        assert!(table_names.contains(&"data_items".to_string()));
-        assert!(table_names.contains(&"metadatas".to_string()));
-        assert!(table_names.contains(&"owner_informations".to_string()));
+        assert!(table_names.contains(&"path_components".to_string()));
+        assert!(table_names.contains(&"items".to_string()));
+        assert!(table_names.contains(&"mod_metadatas".to_string()));
+        assert!(table_names.contains(&"file_system_metadatas".to_string()));
         assert!(table_names.contains(&"mod_times".to_string()));
         assert!(table_names.contains(&"sync_times".to_string()));
 

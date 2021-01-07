@@ -1,6 +1,7 @@
-use super::DataItem;
-use super::Metadata;
-use super::OwnerInformation;
+use super::FileSystemMetadata;
+use super::Item;
+use super::ModMetadata;
+use super::PathComponent;
 
 use version_vector::VersionVector;
 
@@ -8,19 +9,28 @@ use version_vector::VersionVector;
 /// Depending on the synchronization/deletion status, this might,
 /// e.g. not have any metadata assigned to it.
 /// The 'defining' factor for an db entry to be valid is that we have an owner information.
-pub struct ItemInternal {
-    pub data_item: DataItem,
-    pub owner_info: OwnerInformation,
-    pub metadata: Option<Metadata>,
+pub struct DBItemInternal {
+    pub path_component: PathComponent,
+    pub item: Item,
+
+    pub fs_metadata: Option<FileSystemMetadata>,
+    pub mod_metadata: Option<ModMetadata>,
+
     pub mod_time: Option<VersionVector<i64>>,
     pub sync_time: Option<VersionVector<i64>>,
 }
-impl ItemInternal {
-    pub fn from_db_query(item: DataItem, owner: OwnerInformation, meta: Option<Metadata>) -> Self {
+impl DBItemInternal {
+    pub fn from_db_query(
+        path: PathComponent,
+        item: Item,
+        fs_metadata: Option<FileSystemMetadata>,
+        mod_metadata: Option<ModMetadata>,
+    ) -> Self {
         Self {
-            data_item: item,
-            owner_info: owner,
-            metadata: meta,
+            path_component: path,
+            item: item,
+            fs_metadata: fs_metadata,
+            mod_metadata: mod_metadata,
             mod_time: None,
             sync_time: None,
         }
@@ -30,7 +40,7 @@ impl ItemInternal {
 // Represents a local item stored in the DB.
 // We ONLY return this to external actors in a fully loaded state.
 #[derive(Clone)]
-pub struct Item {
+pub struct DBItem {
     pub path_component: String,
     pub sync_time: VersionVector<i64>,
 
@@ -48,9 +58,9 @@ pub enum ItemType {
     FOLDER {
         metadata: ItemFSMetadata,
         creation_time: VersionVector<i64>,
-        last_mod_time: VersionVector<i64>,
 
-        max_mod_time: VersionVector<i64>,
+        last_mod_time: VersionVector<i64>,
+        mod_time: VersionVector<i64>,
     },
 }
 #[derive(Clone)]
@@ -61,7 +71,7 @@ pub struct ItemFSMetadata {
     pub hash: String,
 }
 
-impl Item {
+impl DBItem {
     pub fn is_deletion(&self) -> bool {
         matches!(self.content, ItemType::DELETION { .. })
     }
@@ -82,10 +92,10 @@ impl Item {
         }
     }
 
-    pub fn max_mod_time(&self) -> &VersionVector<i64> {
+    pub fn mod_time(&self) -> &VersionVector<i64> {
         match &self.content {
             ItemType::FILE { last_mod_time, .. } => last_mod_time,
-            ItemType::FOLDER { max_mod_time, .. } => max_mod_time,
+            ItemType::FOLDER { mod_time, .. } => mod_time,
             ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
         }
     }
@@ -103,6 +113,13 @@ impl Item {
     }
     pub fn creation_store_time(&self) -> i64 {
         *self.creation_time().iter().next().as_ref().unwrap().1
+    }
+
+    pub fn last_mod_store_id(&self) -> i64 {
+        *self.last_mod_time().iter().next().as_ref().unwrap().0
+    }
+    pub fn last_mod_store_time(&self) -> i64 {
+        *self.last_mod_time().iter().next().as_ref().unwrap().1
     }
 
     pub fn metadata(&self) -> &ItemFSMetadata {
