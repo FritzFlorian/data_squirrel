@@ -462,26 +462,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         }
                         // AFTER all sub-items are in sync, add the sync time of the remote
                         // folder into this folder.
-                        // FIXME: it is simply not good to differentiate between root and
-                        //        non-root folders in our code...
-                        if path.get_path_components().len() > 1 {
-                            let folder_after_sync = metadata_db::DBItem {
-                                path_component: path.name().to_owned(),
-                                sync_time: sync_response.sync_time,
-                                content: metadata_db::ItemType::FOLDER {
-                                    metadata: response_metadata,
-                                    creation_time: response_creation_time,
-                                    last_mod_time: response_last_mod_time,
-                                    mod_time: VersionVector::new(),
-                                },
-                            };
-                            self.db_access
-                                .sync_local_data_item(&path, &folder_after_sync)?;
-                        } else {
-                            // FIXME: Remove this 'hack' for the root item
-                            self.db_access
-                                .max_sync_times_recursive(&path, &sync_response.sync_time)?;
-                        }
+                        let folder_after_sync = metadata_db::DBItem {
+                            path_component: path.name().to_owned(),
+                            sync_time: sync_response.sync_time,
+                            content: metadata_db::ItemType::FOLDER {
+                                metadata: response_metadata,
+                                creation_time: response_creation_time,
+                                last_mod_time: response_last_mod_time,
+                                mod_time: VersionVector::new(),
+                            },
+                        };
+                        self.db_access
+                            .sync_local_data_item(&path, &folder_after_sync)?;
                     }
                 }
             }

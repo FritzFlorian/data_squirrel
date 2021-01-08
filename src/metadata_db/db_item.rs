@@ -9,6 +9,7 @@ use version_vector::VersionVector;
 /// Depending on the synchronization/deletion status, this might,
 /// e.g. not have any metadata assigned to it.
 /// The 'defining' factor for an db entry to be valid is that we have an owner information.
+#[derive(Clone)]
 pub struct DBItemInternal {
     pub path_component: PathComponent,
     pub item: Item,

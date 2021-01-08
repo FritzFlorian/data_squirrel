@@ -1,6 +1,6 @@
 use super::schema::mod_times;
 
-#[derive(Debug, Queryable)]
+#[derive(Debug, Queryable, Clone)]
 pub struct ModTime {
     pub id: i64,
 

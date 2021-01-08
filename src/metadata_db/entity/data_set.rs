@@ -1,6 +1,6 @@
 use super::schema::data_sets;
 
-#[derive(Debug, Queryable)]
+#[derive(Debug, Queryable, Clone)]
 pub struct DataSet {
     pub id: i64,
     pub unique_name: String,

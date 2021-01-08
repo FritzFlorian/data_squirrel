@@ -1,6 +1,6 @@
 use super::schema::data_stores;
 
-#[derive(Debug, Queryable)]
+#[derive(Debug, Queryable, Clone)]
 pub struct DataStore {
     pub id: i64,
     pub data_set_id: i64,

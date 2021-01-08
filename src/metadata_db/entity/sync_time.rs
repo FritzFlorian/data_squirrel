@@ -1,6 +1,6 @@
 use super::schema::sync_times;
 
-#[derive(Debug, Queryable)]
+#[derive(Debug, Queryable, Clone)]
 pub struct SyncTime {
     pub id: i64,
 

@@ -481,10 +481,7 @@ impl MetadataDB {
                 })
             }
 
-            let lower_case_item_name = path.name().to_lowercase();
-            let path_component = self.ensure_data_item_exists(&lower_case_item_name, &parent_dir_item.path_component)?;
-
-            if let Some(existing_item) = existing_item {
+            let item = if let Some(mut existing_item) = existing_item {
                 if !existing_item.item.is_deleted && existing_item.item.is_file != is_file {
                     return Err(MetadataDBError::ViolatesDBConsistency {
                         message: "Must not change types of entries in the DB. Delete and re-create them instead!",
@@ -499,7 +496,14 @@ impl MetadataDB {
                         items::is_file.eq(is_file)
                     ))
                     .execute(&self.conn)?;
+                existing_item.item.is_deleted = false;
+                existing_item.item.is_file = is_file;
+
+                existing_item.item
             } else {
+                let path_component =
+                    self.ensure_path_exists(&path.name(), &parent_dir_item.path_component)?;
+
                 diesel::insert_into(items::table)
                     .values(item::InsertFull {
                         path_component_id: path_component.id,
@@ -509,11 +513,14 @@ impl MetadataDB {
                         is_deleted: false,
                     })
                     .execute(&self.conn)?;
+
+                let new_item = items::table
+                    .filter(items::path_component_id.eq(path_component.id))
+                    .filter(items::data_store_id.eq(local_data_store.id))
+                    .first::<Item>(&self.conn)?;
+
+                new_item
             };
-            let new_item = items::table
-                .filter(items::path_component_id.eq(path_component.id))
-                .filter(items::data_store_id.eq(local_data_store.id))
-                .first::<Item>(&self.conn)?;
 
             // Associate Metadata with the given entry (...or update an existing one, e.g.
             // for a previously deleted item that still requires a deletion notice in the DB).
@@ -521,7 +528,7 @@ impl MetadataDB {
             // FS Metadata can always be overwritten.
             diesel::replace_into(file_system_metadatas::table)
                 .values(file_system_metadata::InsertFull {
-                    id: new_item.id,
+                    id: item.id,
 
                     case_sensitive_name: path.name(),
                     creation_time: creation_time,
@@ -531,10 +538,10 @@ impl MetadataDB {
 
             // Mod Metadata must not be replaced if it exists!
             // We simply bump the mod time in this case.
-            let existing_mod_metadata = mod_metadatas::table.find(new_item.id).first::<ModMetadata>(&self.conn).optional()?;
+            let existing_mod_metadata = mod_metadatas::table.find(item.id).first::<ModMetadata>(&self.conn).optional()?;
             if existing_mod_metadata.is_none() {
                 diesel::insert_into(mod_metadatas::table).values(mod_metadata::InsertFull{
-                    id: new_item.id,
+                    id: item.id,
 
                     creator_store_id: local_data_store.id,
                     creator_store_time: new_time,
@@ -545,17 +552,30 @@ impl MetadataDB {
             }
 
             // Add the modification event (both changes and newly created items require mod events).
-            self.add_mod_event(&new_item, local_data_store.id, new_time)?;
+            self.add_mod_event(&item, local_data_store.id, new_time)?;
 
             Ok(())
         })
     }
 
+    // Given a vector of path items and the expected depth of the target_item on this path,
+    // return it's parent directory and optionally the target_items itself.
+    //
+    // Returns an Error if even the parent_item does not exist.
+    //
+    // 'Normalizes' the root directory, i.e. it returns the root directory as the parent of the
+    // root directory.
     fn extract_parent_dir_and_item(
         mut path_items: Vec<DBItemInternal>,
         target_item_depth: usize,
     ) -> Result<(DBItemInternal, Option<DBItemInternal>)> {
-        if path_items.len() == target_item_depth {
+        if target_item_depth == 1 {
+            // Special case for root directory.
+            let parent_dir_item = path_items.pop().unwrap();
+            let existing_item = Some(parent_dir_item.clone());
+
+            Ok((parent_dir_item, existing_item))
+        } else if path_items.len() == target_item_depth {
             let existing_item = Some(path_items.pop().unwrap());
             let parent_dir_item = path_items.pop().unwrap();
 
@@ -609,12 +629,9 @@ impl MetadataDB {
                 });
             }
 
-            let lower_case_name = path.name().to_lowercase();
-            let path_component = self.ensure_data_item_exists(&lower_case_name, &parent_dir_item.path_component)?;
-
             // Associate item with the path (...or update an existing one, e.g.
             // for a previously deleted item that still requires a deletion notice in the DB).
-            if let Some(existing_item) = &existing_item {
+            let item = if let Some(existing_item) = &existing_item {
                 let item_will_be_deleted = !existing_item.item.is_deleted && target_item.is_deletion();
                 let item_no_longer_folder = !existing_item.item.is_file && !target_item.is_folder();
 
@@ -642,7 +659,15 @@ impl MetadataDB {
                         items::is_file.eq(target_item.is_file()),
                         items::is_deleted.eq(target_item.is_deletion()),
                     )).execute(&self.conn)?;
+                let mut result_item = existing_item.item.clone();
+                result_item.is_file = target_item.is_file();
+                result_item.is_deleted = target_item.is_deletion();
+
+                result_item
             } else {
+                let path_component =
+                    self.ensure_path_exists(&path.name(), &parent_dir_item.path_component)?;
+
                 // Just create a new item with the correct values.
                 diesel::insert_into(items::table)
                     .values(item::InsertFull {
@@ -653,17 +678,20 @@ impl MetadataDB {
                         is_deleted: target_item.is_deletion(),
                     })
                     .execute(&self.conn)?;
-            }
-            let new_item = items::table
-                .filter(items::path_component_id.eq(path_component.id))
-                .filter(items::data_store_id.eq(local_data_store.id))
-                .first::<Item>(&self.conn)?;
+
+                let new_item = items::table
+                    .filter(items::path_component_id.eq(path_component.id))
+                    .filter(items::data_store_id.eq(local_data_store.id))
+                    .first::<Item>(&self.conn)?;
+
+                new_item
+            };
 
             if !target_item.is_deletion() {
                 // FS Metadata can always be overwritten safely.
                 diesel::replace_into(file_system_metadatas::table)
                     .values(file_system_metadata::InsertFull {
-                        id: new_item.id,
+                        id: item.id,
 
                         case_sensitive_name: &target_item.metadata().case_sensitive_name,
                         creation_time: target_item.metadata().creation_time,
@@ -675,7 +703,7 @@ impl MetadataDB {
                 // a folder.
                 let mod_metadata_exits = existing_item.is_some() && !existing_item.unwrap().item.is_deleted;
                 if mod_metadata_exits {
-                    diesel::update(mod_metadatas::table.find(new_item.id))
+                    diesel::update(mod_metadatas::table.find(item.id))
                         .set(mod_metadata::UpdateCreator{
                             creator_store_id: target_item.creation_store_id(),
                             creator_store_time: target_item.creation_store_time(),
@@ -683,7 +711,7 @@ impl MetadataDB {
                 } else {
                     diesel::insert_into(mod_metadatas::table)
                         .values(mod_metadata::InsertFull {
-                            id: new_item.id,
+                            id: item.id,
 
                             creator_store_id: target_item.creation_store_id(),
                             creator_store_time: target_item.creation_store_time(),
@@ -696,13 +724,13 @@ impl MetadataDB {
                 // Simply set the last_mod_time and let it bump the parent items mod times.
                 // We never directly sync the mod_times (max in folders), these should always be
                 // implicitly set by child items being updated.
-                self.add_mod_event(&new_item, target_item.last_mod_store_id(), target_item.last_mod_store_time())?
+                self.add_mod_event(&item, target_item.last_mod_store_id(), target_item.last_mod_store_time())?
             }
 
             // ALL items in the db hold a sync time, thus always update it.
             let mut target_sync_time = current_item_sync_time;
             target_sync_time.max(&target_item.sync_time);
-            self.update_sync_times(&new_item, &target_sync_time)?;
+            self.update_sync_times(&item, &target_sync_time)?;
 
             Ok(())
         })
@@ -783,34 +811,30 @@ impl MetadataDB {
         Ok(())
     }
 
-    fn ensure_data_item_exists(
-        &self,
-        lower_case_name: &str,
-        parent: &PathComponent,
-    ) -> Result<PathComponent> {
-        // Insert new path (...or keep existing one).
+    fn ensure_path_exists(&self, name: &str, parent: &PathComponent) -> Result<PathComponent> {
+        let name = name.to_lowercase();
+
         let existing_path = path_components::table
-            .filter(path_components::path_component.eq(lower_case_name))
+            .filter(path_components::path_component.eq(&name))
             .filter(path_components::parent_component_id.eq(parent.id))
             .first::<PathComponent>(&self.conn)
             .optional()?;
-        let result_path = if let Some(path) = existing_path {
-            path
-        } else {
-            diesel::insert_into(path_components::table)
-                .values(path_component::InsertFull {
-                    parent_component_id: Some(parent.id),
-                    path_component: &lower_case_name,
-                })
-                .execute(&self.conn)?;
+        if let Some(existing_path) = existing_path {
+            return Ok(existing_path);
+        }
 
-            path_components::table
-                .filter(path_components::path_component.eq(lower_case_name))
-                .filter(path_components::parent_component_id.eq(parent.id))
-                .first::<PathComponent>(&self.conn)?
-        };
+        diesel::insert_into(path_components::table)
+            .values(path_component::InsertFull {
+                parent_component_id: Some(parent.id),
+                path_component: &name,
+            })
+            .execute(&self.conn)?;
 
-        Ok(result_path)
+        let new_path = path_components::table
+            .filter(path_components::path_component.eq(&name))
+            .filter(path_components::parent_component_id.eq(parent.id))
+            .first::<PathComponent>(&self.conn)?;
+        Ok(new_path)
     }
 
     pub fn delete_local_data_item(&self, path: &RelativePath) -> Result<usize> {
