@@ -176,17 +176,17 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 metadata_db::ItemType::FILE {
                     metadata: local_metadata,
                     creation_time: local_creation_time,
-                    last_mod_time: local_mod_time,
+                    last_mod_time: local_last_mod_time,
                 } => Ok(IntSyncResponse {
                     sync_time: local_item.sync_time,
                     action: IntSyncAction::UpdateRequired(IntSyncContent::File {
-                        mod_time: local_mod_time,
+                        last_mod_time: local_last_mod_time,
                         creation_time: local_creation_time,
                         fs_metadata: local_metadata,
                     }),
                 }),
                 metadata_db::ItemType::FOLDER {
-                    mod_time: local_mod_time,
+                    last_mod_time: local_last_mod_time,
                     metadata: local_metadata,
                     creation_time: local_creation_time,
                     ..
@@ -201,7 +201,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     Ok(IntSyncResponse {
                         sync_time: local_item.sync_time,
                         action: IntSyncAction::UpdateRequired(IntSyncContent::Folder {
-                            mod_time: local_mod_time,
+                            last_mod_time: local_last_mod_time,
                             creation_time: local_creation_time,
                             fs_metadata: local_metadata,
                             child_items: child_item_names,
@@ -337,13 +337,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         }
                     }
                     IntSyncContent::File {
-                        mod_time: response_mod_time,
+                        last_mod_time: response_last_mod_time,
                         fs_metadata: response_metadata,
                         creation_time: response_creation_time,
                     } => {
-                        if response_mod_time <= local_item.sync_time {
-                            panic!("We should never receive non-updates from the remote!");
-                        } else if local_item.is_deletion()
+                        if local_item.is_deletion()
                             && response_creation_time <= local_item.sync_time
                         {
                             panic!("Detected sync-conflict!");
@@ -384,7 +382,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 content: metadata_db::ItemType::FILE {
                                     metadata: response_metadata,
                                     creation_time: response_creation_time,
-                                    last_mod_time: response_mod_time,
+                                    last_mod_time: response_last_mod_time,
                                 },
                             };
                             self.db_access.sync_local_data_item(&path, &target_item)?;
@@ -393,14 +391,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         }
                     }
                     IntSyncContent::Folder {
-                        mod_time: response_mod_time,
+                        last_mod_time: response_last_mod_time,
                         creation_time: response_creation_time,
                         fs_metadata: response_metadata,
                         child_items: response_child_items,
                     } => {
-                        if response_mod_time <= local_item.sync_time {
-                            panic!("We should never receive non-updates from the remote!");
-                        } else if local_item.is_deletion()
+                        if local_item.is_deletion()
                             && response_creation_time <= local_item.sync_time
                         {
                             panic!("Detected sync-conflict!");
@@ -475,11 +471,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 content: metadata_db::ItemType::FOLDER {
                                     metadata: response_metadata,
                                     creation_time: response_creation_time,
-                                    // FIXME: for this to work we also have to fix the DB to
-                                    //        differentiate between single, last mod and max mod
-                                    //        held in folders.
-                                    last_mod_time: response_mod_time.clone(),
-                                    mod_time: response_mod_time,
+                                    last_mod_time: response_last_mod_time,
+                                    mod_time: VersionVector::new(),
                                 },
                             };
                             self.db_access

@@ -48,13 +48,13 @@ pub enum ExtSyncAction {
 pub enum ExtSyncContent {
     Deletion,
     File {
-        mod_time: SyncVersionVector,
+        last_mod_time: SyncVersionVector,
         creation_time: SyncVersionVector,
 
         fs_metadata: ItemFSMetadata,
     },
     Folder {
-        mod_time: SyncVersionVector,
+        last_mod_time: SyncVersionVector,
         creation_time: SyncVersionVector,
 
         fs_metadata: ItemFSMetadata,
@@ -73,13 +73,13 @@ pub enum IntSyncAction {
 pub enum IntSyncContent {
     Deletion,
     File {
-        mod_time: VersionVector<i64>,
+        last_mod_time: VersionVector<i64>,
         creation_time: VersionVector<i64>,
 
         fs_metadata: ItemFSMetadata,
     },
     Folder {
-        mod_time: VersionVector<i64>,
+        last_mod_time: VersionVector<i64>,
         creation_time: VersionVector<i64>,
 
         fs_metadata: ItemFSMetadata,
@@ -133,21 +133,21 @@ impl ExtSyncContent {
         match self {
             Self::Deletion => Ok(IntSyncContent::Deletion),
             Self::File {
-                mod_time,
+                last_mod_time,
                 creation_time,
                 fs_metadata,
             } => Ok(IntSyncContent::File {
-                mod_time: db_access.named_to_id_version_vector(&mod_time)?,
+                last_mod_time: db_access.named_to_id_version_vector(&last_mod_time)?,
                 creation_time: db_access.named_to_id_version_vector(&creation_time)?,
                 fs_metadata,
             }),
             Self::Folder {
-                mod_time,
+                last_mod_time,
                 creation_time,
                 fs_metadata,
                 child_items,
             } => Ok(IntSyncContent::Folder {
-                mod_time: db_access.named_to_id_version_vector(&mod_time)?,
+                last_mod_time: db_access.named_to_id_version_vector(&last_mod_time)?,
                 creation_time: db_access.named_to_id_version_vector(&creation_time)?,
                 fs_metadata,
                 child_items,
@@ -180,21 +180,21 @@ impl IntSyncContent {
         match self {
             Self::Deletion => Ok(ExtSyncContent::Deletion),
             Self::File {
-                mod_time,
+                last_mod_time,
                 creation_time,
                 fs_metadata,
             } => Ok(ExtSyncContent::File {
-                mod_time: db_access.id_to_named_version_vector(&mod_time)?,
+                last_mod_time: db_access.id_to_named_version_vector(&last_mod_time)?,
                 creation_time: db_access.id_to_named_version_vector(&creation_time)?,
                 fs_metadata,
             }),
             Self::Folder {
-                mod_time,
+                last_mod_time,
                 creation_time,
                 fs_metadata,
                 child_items,
             } => Ok(ExtSyncContent::Folder {
-                mod_time: db_access.id_to_named_version_vector(&mod_time)?,
+                last_mod_time: db_access.id_to_named_version_vector(&last_mod_time)?,
                 creation_time: db_access.id_to_named_version_vector(&creation_time)?,
                 fs_metadata,
                 child_items,
