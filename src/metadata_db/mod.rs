@@ -767,6 +767,7 @@ impl MetadataDB {
                 }
             } else {
                 let mut folder_sync_time = VersionVector::new();
+                folder_sync_time[&local_data_store.id] = local_data_store.time;
                 for mut parent_item in &mut items_path_to_target {
                     self.load_sync_time_for_item(&mut parent_item)?;
                     folder_sync_time.max(&parent_item.sync_time.as_ref().unwrap());
@@ -1011,7 +1012,8 @@ impl MetadataDB {
             let current_mod_vector = self.get_mod_times(&current_item)?;
 
             let mut new_mod_vector = current_mod_vector;
-            new_mod_vector[&modifying_data_store_id] = modification_time;
+            new_mod_vector[&modifying_data_store_id] =
+                std::cmp::max(modification_time, new_mod_vector[&modifying_data_store_id]);
             if !current_item.is_file {
                 self.update_mod_times(&current_item, &new_mod_vector)?;
             }
@@ -1049,15 +1051,11 @@ impl MetadataDB {
     }
     /// Updates the modification times of an DB entry by replacing all
     /// given vector time entries (represented by their data_store id).
-    fn update_mod_times(
-        &self,
-        owner_information: &Item,
-        new_mod_times: &VersionVector<i64>,
-    ) -> Result<()> {
+    fn update_mod_times(&self, item: &Item, new_mod_times: &VersionVector<i64>) -> Result<()> {
         let new_db_entries: Vec<_> = new_mod_times
             .iter()
             .map(|(data_store_id, time)| mod_time::InsertFull {
-                mod_metadata_id: owner_information.id,
+                mod_metadata_id: item.id,
                 data_store_id: data_store_id.clone(),
                 time: time.clone(),
             })
@@ -1087,26 +1085,6 @@ impl MetadataDB {
             .execute(&self.conn)?;
 
         Ok(())
-    }
-
-    /// Queries the synchronization time vector for a given OwnerInformation
-    /// (and thus indirectly for the associated data_item).
-    ///
-    /// Note: The synchronization time vector represents (local data_store_id -> time) pairs,
-    ///       for  exchange with other data_stores it must be 'translated' to a vector version
-    ///       where times are identified by ('unique-str' -> time) pairs.
-    pub fn get_sync_times(&self, item: &Item) -> Result<VersionVector<i64>> {
-        let sync_times: Vec<ModTime> = sync_times::table
-            .filter(sync_times::item_id.eq(item.id))
-            .load(&self.conn)?;
-
-        let mut result = VersionVector::new();
-        for sync_time in &sync_times {
-            // FIXME: The sync times are not as simple. We need to iterate up the parent chain...
-            result[&sync_time.data_store_id] = sync_time.time;
-        }
-
-        Ok(result)
     }
 
     /// Helper that increases the version of the local data store.
