@@ -4,30 +4,48 @@ use fs_interaction::relative_path::RelativePath;
 use metadata_db;
 use metadata_db::ItemFSMetadata;
 use metadata_db::MetadataDB;
+use std::collections::HashMap;
 
-// TODO: In general, if we really push this protocol over the network later on optimize out all
-//       the not needed strings (especially the ID's in the version vectors can be simplified).
-//       The main point to do this is when we go from a local to an external representation and
-//       vice versa.
-// TODO: Can optimize transferred data in many ways (not full path's, compress sync vectors, ...).
-// TODO: On an over-the-wire protocol we probably also want to batch send this stuff, e.g.
-//       always include the sync/mod times of directory content.
+/// Handshake message before the actual sync procedure starts running.
+pub struct SyncHandshake {
+    pub data_set_name: String,
+    pub data_stores: Vec<metadata_db::DataStore>,
+}
+/// Mapper to translate remote data store IDs into local data store IDs.
+/// This is required to understand the sync and version vectors given by the other store.
+pub struct DataStoreIDMapper {
+    ext_to_int: HashMap<i64, i64>,
+}
+impl DataStoreIDMapper {
+    pub fn create_mapper(local_db: &MetadataDB, remote: SyncHandshake) -> super::Result<Self> {
+        let mut ext_to_int = HashMap::with_capacity(remote.data_stores.len());
 
-/// VersionVector used during synchronization.
-/// It uses full unique string identifiers for each data_store involved, as the database ID's might
-/// differ depending on the exact DB layout. The data_store that uses the pool can then convert
-/// this universal/over the wire representation to its local DB equivalent.
-///
-/// All sync types have a local/internal representation, i.e. they contain ids from our local db,
-/// and an external representation, i.e. they contain full, unique string identifiers.
-pub type SyncVersionVector = VersionVector<String>;
+        for remote_data_store in remote.data_stores {
+            let local_data_store = local_db
+                .get_data_store(&remote_data_store.unique_name)?
+                .unwrap();
+            ext_to_int.insert(remote_data_store.id, local_data_store.id);
+        }
+
+        Ok(Self { ext_to_int })
+    }
+
+    pub fn external_to_internal(&self, ext_vector: &VersionVector<i64>) -> VersionVector<i64> {
+        let mut result = VersionVector::new();
+        for (id, time) in ext_vector.iter() {
+            result[&self.ext_to_int[id]] = *time;
+        }
+
+        result
+    }
+}
 
 /// Send this request to synchronize an item with a target data store.
 /// It will answer appropriately depending on it's local DB entries, i.e. for a file it only
 /// answers with information on the individual file, for a folder it includes it's contents.
 pub struct ExtSyncRequest {
     pub item_path: RelativePath,
-    pub item_sync_time: SyncVersionVector,
+    pub item_sync_time: VersionVector<i64>,
 }
 
 pub struct IntSyncRequest {
@@ -38,7 +56,7 @@ pub struct IntSyncRequest {
 /// Response to a SyncRequest.
 /// The answer depends on the type found on the remote end and if it requires synchronization.
 pub struct ExtSyncResponse {
-    pub sync_time: SyncVersionVector,
+    pub sync_time: VersionVector<i64>,
     pub action: ExtSyncAction,
 }
 pub enum ExtSyncAction {
@@ -48,14 +66,14 @@ pub enum ExtSyncAction {
 pub enum ExtSyncContent {
     Deletion,
     File {
-        last_mod_time: SyncVersionVector,
-        creation_time: SyncVersionVector,
+        last_mod_time: VersionVector<i64>,
+        creation_time: VersionVector<i64>,
 
         fs_metadata: ItemFSMetadata,
     },
     Folder {
-        last_mod_time: SyncVersionVector,
-        creation_time: SyncVersionVector,
+        last_mod_time: VersionVector<i64>,
+        creation_time: VersionVector<i64>,
 
         fs_metadata: ItemFSMetadata,
         child_items: Vec<String>,
@@ -93,112 +111,112 @@ pub enum IntSyncContent {
 
 // Sync Request Implementation
 impl ExtSyncRequest {
-    pub fn internalize(self, db_access: &MetadataDB) -> metadata_db::Result<IntSyncRequest> {
-        Ok(IntSyncRequest {
+    pub fn internalize(self, mapper: &DataStoreIDMapper) -> IntSyncRequest {
+        IntSyncRequest {
             item_path: self.item_path,
-            item_sync_time: db_access.named_to_id_version_vector(&self.item_sync_time)?,
-        })
+            item_sync_time: mapper.external_to_internal(&self.item_sync_time),
+        }
     }
 }
 impl IntSyncRequest {
-    pub fn externalize(self, db_access: &MetadataDB) -> metadata_db::Result<ExtSyncRequest> {
-        Ok(ExtSyncRequest {
+    pub fn externalize(self, _mapper: &DataStoreIDMapper) -> ExtSyncRequest {
+        ExtSyncRequest {
             item_path: self.item_path,
-            item_sync_time: db_access.id_to_named_version_vector(&self.item_sync_time)?,
-        })
+            item_sync_time: self.item_sync_time,
+        }
     }
 }
 
 // Sync Response Implementation (from local to external)
 impl ExtSyncResponse {
-    pub fn internalize(self, db_access: &MetadataDB) -> metadata_db::Result<IntSyncResponse> {
-        Ok(IntSyncResponse {
-            sync_time: db_access.named_to_id_version_vector(&self.sync_time)?,
-            action: self.action.internalize(&db_access)?,
-        })
+    pub fn internalize(self, mapper: &DataStoreIDMapper) -> IntSyncResponse {
+        IntSyncResponse {
+            sync_time: mapper.external_to_internal(&self.sync_time),
+            action: self.action.internalize(&mapper),
+        }
     }
 }
 impl ExtSyncAction {
-    pub fn internalize(self, db_access: &MetadataDB) -> metadata_db::Result<IntSyncAction> {
+    pub fn internalize(self, mapper: &DataStoreIDMapper) -> IntSyncAction {
         match self {
-            Self::UpToDate => Ok(IntSyncAction::UpToDate),
-            Self::UpdateRequired(content) => Ok(IntSyncAction::UpdateRequired(
-                content.internalize(&db_access)?,
-            )),
+            Self::UpToDate => IntSyncAction::UpToDate,
+            Self::UpdateRequired(content) => {
+                IntSyncAction::UpdateRequired(content.internalize(&mapper))
+            }
         }
     }
 }
 impl ExtSyncContent {
-    pub fn internalize(self, db_access: &MetadataDB) -> metadata_db::Result<IntSyncContent> {
+    pub fn internalize(self, mapper: &DataStoreIDMapper) -> IntSyncContent {
         match self {
-            Self::Deletion => Ok(IntSyncContent::Deletion),
+            Self::Deletion => IntSyncContent::Deletion,
             Self::File {
                 last_mod_time,
                 creation_time,
                 fs_metadata,
-            } => Ok(IntSyncContent::File {
-                last_mod_time: db_access.named_to_id_version_vector(&last_mod_time)?,
-                creation_time: db_access.named_to_id_version_vector(&creation_time)?,
+            } => IntSyncContent::File {
+                last_mod_time: mapper.external_to_internal(&last_mod_time),
+                creation_time: mapper.external_to_internal(&creation_time),
                 fs_metadata,
-            }),
+            },
             Self::Folder {
                 last_mod_time,
                 creation_time,
                 fs_metadata,
                 child_items,
-            } => Ok(IntSyncContent::Folder {
-                last_mod_time: db_access.named_to_id_version_vector(&last_mod_time)?,
-                creation_time: db_access.named_to_id_version_vector(&creation_time)?,
+            } => IntSyncContent::Folder {
+                last_mod_time: mapper.external_to_internal(&last_mod_time),
+                creation_time: mapper.external_to_internal(&creation_time),
                 fs_metadata,
                 child_items,
-            }),
+            },
         }
     }
 }
 
 // Sync Response Implementation (from external to local)
 impl IntSyncResponse {
-    pub fn externalize(self, db_access: &MetadataDB) -> metadata_db::Result<ExtSyncResponse> {
-        Ok(ExtSyncResponse {
-            sync_time: db_access.id_to_named_version_vector(&self.sync_time)?,
-            action: self.action.externalize(&db_access)?,
-        })
+    pub fn externalize(self, mapper: &DataStoreIDMapper) -> ExtSyncResponse {
+        ExtSyncResponse {
+            sync_time: self.sync_time,
+            action: self.action.externalize(&mapper),
+        }
     }
 }
 impl IntSyncAction {
-    pub fn externalize(self, db_access: &MetadataDB) -> metadata_db::Result<ExtSyncAction> {
+    pub fn externalize(self, mapper: &DataStoreIDMapper) -> ExtSyncAction {
         match self {
-            Self::UpToDate => Ok(ExtSyncAction::UpToDate),
-            Self::UpdateRequired(content) => Ok(ExtSyncAction::UpdateRequired(
-                content.externalize(&db_access)?,
-            )),
+            Self::UpToDate => ExtSyncAction::UpToDate,
+            Self::UpdateRequired(content) => {
+                ExtSyncAction::UpdateRequired(content.externalize(&mapper))
+            }
         }
     }
 }
 impl IntSyncContent {
-    pub fn externalize(self, db_access: &MetadataDB) -> metadata_db::Result<ExtSyncContent> {
+    pub fn externalize(self, _mapper: &DataStoreIDMapper) -> ExtSyncContent {
         match self {
-            Self::Deletion => Ok(ExtSyncContent::Deletion),
+            Self::Deletion => ExtSyncContent::Deletion,
             Self::File {
                 last_mod_time,
                 creation_time,
                 fs_metadata,
-            } => Ok(ExtSyncContent::File {
-                last_mod_time: db_access.id_to_named_version_vector(&last_mod_time)?,
-                creation_time: db_access.id_to_named_version_vector(&creation_time)?,
+            } => ExtSyncContent::File {
+                last_mod_time: last_mod_time,
+                creation_time: creation_time,
                 fs_metadata,
-            }),
+            },
             Self::Folder {
                 last_mod_time,
                 creation_time,
                 fs_metadata,
                 child_items,
-            } => Ok(ExtSyncContent::Folder {
-                last_mod_time: db_access.id_to_named_version_vector(&last_mod_time)?,
-                creation_time: db_access.id_to_named_version_vector(&creation_time)?,
+            } => ExtSyncContent::Folder {
+                last_mod_time: last_mod_time,
+                creation_time: creation_time,
                 fs_metadata,
                 child_items,
-            }),
+            },
         }
     }
 }

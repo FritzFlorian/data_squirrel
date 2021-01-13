@@ -100,9 +100,18 @@ impl MetadataDB {
     /// List all data stores managed by the open MetadataDB.
     /// At most one of them must be the local data set (marked with 'is_this_data_store == true').
     pub fn get_data_stores(&self) -> Result<Vec<DataStore>> {
-        use self::schema::data_stores::dsl::*;
         // We currently only allow EXACTLY ONE data_set, thus we do not need to join here.
-        let result = data_stores.load(&self.conn)?;
+        let result = data_stores::table.load(&self.conn)?;
+        Ok(result)
+    }
+
+    // Searches for the given data store and returns it if it exists.
+    pub fn get_data_store(&self, unique_name: &str) -> Result<Option<DataStore>> {
+        // We currently only allow EXACTLY ONE data_set, thus we do not need to join here.
+        let result = data_stores::table
+            .filter(data_stores::unique_name.eq(unique_name))
+            .first::<DataStore>(&self.conn)
+            .optional()?;
         Ok(result)
     }
 
@@ -931,43 +940,6 @@ impl MetadataDB {
         Ok(())
     }
 
-    /// Converts a version vector indexed by data_store unique names to an local representation,
-    /// indexed by database ID's. Operation can be reversed using id_to_named_version_vector(...).
-    pub fn named_to_id_version_vector(
-        &self,
-        named_vector: &VersionVector<String>,
-    ) -> Result<VersionVector<i64>> {
-        let mut result = VersionVector::new();
-        for (data_store_name, time) in named_vector.iter() {
-            // TODO: Special Error Type in case we do not know the other repo!
-            let data_store_id = data_stores::table
-                .select(data_stores::id)
-                .filter(data_stores::unique_name.eq(data_store_name))
-                .first::<i64>(&self.conn)?;
-            result[&data_store_id] = *time;
-        }
-
-        Ok(result)
-    }
-
-    /// Converts a id vector indexed by local data_store DB Id's to an universial representation,
-    /// indexed by data_set names. Operation can be reversed using named_to_id_version_vector(...).
-    pub fn id_to_named_version_vector(
-        &self,
-        id_vector: &VersionVector<i64>,
-    ) -> Result<VersionVector<String>> {
-        let mut result = VersionVector::new();
-        for (data_store_id, time) in id_vector.iter() {
-            let data_store_id = data_stores::table
-                .select(data_stores::unique_name)
-                .find(data_store_id)
-                .first::<String>(&self.conn)?;
-            result[&data_store_id] = *time;
-        }
-
-        Ok(result)
-    }
-
     /// Updates the modification time of the given item (via its owner information) to
     /// include the given modification done by a the given data store at the given time stamp
     /// (i.e. it sets the item's modification time to MAX{current_mod_vector, given_mod_event}).
@@ -1420,54 +1392,5 @@ mod tests {
             .unwrap();
         assert!(file_item_after_update.is_deletion());
         assert_eq!(file_item_after_update.sync_time[&remote_store.id], 4096,);
-    }
-
-    #[test]
-    fn convert_from_and_to_named_version_vectors() {
-        let metadata_store = open_metadata_store();
-
-        // Create sample data stores
-        let data_set = metadata_store.create_data_set("abc").unwrap();
-        let data_store_a = metadata_store
-            .create_data_store(&data_store::InsertFull {
-                data_set_id: data_set.id,
-                unique_name: &"a",
-                human_name: &"a",
-                is_this_store: true,
-                time: 0,
-
-                creation_date: &NaiveDateTime::from_timestamp(0, 0),
-                path_on_device: &"/",
-                location_note: &"",
-            })
-            .unwrap();
-        let data_store_b = metadata_store
-            .create_data_store(&data_store::InsertFull {
-                data_set_id: data_set.id,
-                unique_name: &"b",
-                human_name: &"b",
-                is_this_store: false,
-                time: 0,
-
-                creation_date: &NaiveDateTime::from_timestamp(0, 0),
-                path_on_device: &"/",
-                location_note: &"",
-            })
-            .unwrap();
-
-        let mut named_vector_1 = VersionVector::<String>::new();
-        named_vector_1[&String::from("a")] = 1;
-        named_vector_1[&String::from("b")] = 2;
-
-        let id_vector_1 = metadata_store
-            .named_to_id_version_vector(&named_vector_1)
-            .unwrap();
-        assert_eq!(id_vector_1[&data_store_a.id], 1);
-        assert_eq!(id_vector_1[&data_store_b.id], 2);
-
-        let named_vector_1_copy = metadata_store
-            .id_to_named_version_vector(&id_vector_1)
-            .unwrap();
-        assert_eq!(named_vector_1, named_vector_1_copy);
     }
 }

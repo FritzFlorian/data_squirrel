@@ -145,17 +145,58 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         self.perform_scan(&root_path, &root_metadata)
     }
 
+    /// Includes the data stores given into the local database and returns a list of all
+    /// stores known after the operation.
+    /// This should be done before a item or folder is synced to make sure both data stores
+    /// know about the same data stores related to the given data set.
+    pub fn sync_data_store_list(&self, sync_handshake: SyncHandshake) -> Result<SyncHandshake> {
+        let local_data_set = self.get_data_set()?;
+        if local_data_set.unique_name != sync_handshake.data_set_name {
+            return Err(DataStoreError::SyncError {
+                message: "Must only sync matching data_sets!",
+            });
+        }
+
+        for remote_data_store in sync_handshake.data_stores {
+            let local_data_store = self
+                .db_access
+                .get_data_store(&remote_data_store.unique_name)?;
+            if local_data_store.is_none() {
+                self.db_access
+                    .create_data_store(&metadata_db::data_store::InsertFull {
+                        data_set_id: local_data_set.id,
+                        unique_name: &remote_data_store.unique_name,
+                        human_name: &remote_data_store.human_name,
+                        creation_date: &remote_data_store.creation_date,
+                        path_on_device: &remote_data_store.path_on_device,
+                        location_note: &remote_data_store.location_note,
+                        is_this_store: false,
+                        time: remote_data_store.time,
+                    })?;
+            }
+        }
+
+        Ok(SyncHandshake {
+            data_set_name: local_data_set.unique_name,
+            data_stores: self.db_access.get_data_stores()?,
+        })
+    }
+
     /// Ask the data store to synchronize a single item.
     /// The store will answer with all necessary information for the caller to perform the sync.
-    pub fn request_sync(&self, sync_request: ExtSyncRequest) -> Result<ExtSyncResponse> {
+    pub fn sync_item(
+        &self,
+        sync_request: ExtSyncRequest,
+        mapper: &DataStoreIDMapper,
+    ) -> Result<ExtSyncResponse> {
         // We 'translate' the external representation of vector times and other
         // content that is dependent on local database id's to easily work with it.
-        let int_sync_request = sync_request.internalize(&self.db_access)?;
-        let int_sync_response = self.request_sync_int(int_sync_request)?;
+        let int_sync_request = sync_request.internalize(&mapper);
+        let int_sync_response = self.sync_item_internal(int_sync_request)?;
 
-        Ok(int_sync_response.externalize(&self.db_access)?)
+        Ok(int_sync_response.externalize(&mapper))
     }
-    pub fn request_sync_int(&self, sync_request: IntSyncRequest) -> Result<IntSyncResponse> {
+    pub fn sync_item_internal(&self, sync_request: IntSyncRequest) -> Result<IntSyncResponse> {
         let local_item = self
             .db_access
             .get_local_data_item(&sync_request.item_path)?;
@@ -216,76 +257,54 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     // Synchronizes in the direction from_other -> self, i.e. self will contain all changes done
     // in from_other after the operation completes successfully.
     pub fn sync_from_other_store(&self, from_other: &Self, path: &RelativePath) -> Result<()> {
-        // This is a first version of a synchronization between two data stores that skips
-        // most of the message-passing required to abstract this to a remote sync.
-        // We still try to keep distinct interaction points between the stores, i.e. we try to
-        // never directly read properties of the other store but only call methods on it.
-        // Later on, we can pull these method calls out into a message-exchange protocol.
+        // Step 0) Handshake so both stores know about the same data_stores and can map their
+        //         data base ID's to each others local view.
+        let (local_mapper, remote_mapper) = self.sync_data_store_lists(&from_other)?;
+
+        // Perform Actual Synchronization
+        self.sync_from_other_store_recursive(&from_other, &path, &local_mapper, &remote_mapper)
+    }
+
+    fn sync_data_store_lists(
+        &self,
+        remote: &Self,
+    ) -> Result<(DataStoreIDMapper, DataStoreIDMapper)> {
         let local_data_set = self.db_access.get_data_set()?;
-        let remote_data_set = from_other.get_data_set()?;
+        let local_sync_handshake = SyncHandshake {
+            data_set_name: local_data_set.unique_name.clone(),
+            data_stores: self.db_access.get_data_stores()?,
+        };
+        let remote_data_set = remote.get_data_set()?;
+        let remote_sync_handshake = SyncHandshake {
+            data_set_name: remote_data_set.unique_name,
+            data_stores: remote.db_access.get_data_stores()?,
+        };
 
-        if local_data_set.unique_name != remote_data_set.unique_name {
-            return Err(DataStoreError::SyncError {
-                message: "Must only sync matching data_sets!",
-            });
-        }
+        let local_response = remote.sync_data_store_list(local_sync_handshake)?;
+        let remote_response = self.sync_data_store_list(remote_sync_handshake)?;
+        let local_mapper = DataStoreIDMapper::create_mapper(&self.db_access, local_response)?;
+        let remote_mapper = DataStoreIDMapper::create_mapper(&remote.db_access, remote_response)?;
 
-        // TODO: pull this step into 'preparation' phase, together with a translation table
-        //       for remote to local data-store ID's to not send the full identifiers all the time.
-        // STEP 0) Preparation: make sure we know all data_stores that other knows off
-        //         (and the other way around)
-        let other_data_stores = from_other.get_data_stores()?;
-        for data_store in other_data_stores {
-            // TODO: properly handle updates of data stores, we currently simply ignore the
-            //       error for duplicated data_stores in the DB.
-            self.db_access
-                .create_data_store(&metadata_db::data_store::InsertFull {
-                    data_set_id: local_data_set.id,
+        Ok((local_mapper, remote_mapper))
+    }
 
-                    unique_name: &data_store.unique_name,
-                    human_name: &data_store.human_name,
-
-                    is_this_store: false,
-                    creation_date: &data_store.creation_date,
-                    path_on_device: &data_store.path_on_device,
-                    location_note: &data_store.location_note,
-
-                    time: 0,
-                })
-                .ok();
-        }
-        let local_data_stores = self.get_data_stores()?;
-        for data_store in local_data_stores {
-            // TODO: properly handle updates of data stores, we currently simply ignore the
-            //       error for duplicated data_stores in the DB.
-            from_other
-                .db_access
-                .create_data_store(&metadata_db::data_store::InsertFull {
-                    data_set_id: local_data_set.id,
-
-                    unique_name: &data_store.unique_name,
-                    human_name: &data_store.human_name,
-
-                    is_this_store: false,
-                    creation_date: &data_store.creation_date,
-                    path_on_device: &data_store.path_on_device,
-                    location_note: &data_store.location_note,
-
-                    time: 0,
-                })
-                .ok();
-        }
-
+    fn sync_from_other_store_recursive(
+        &self,
+        from_other: &Self,
+        path: &RelativePath,
+        local_mapper: &DataStoreIDMapper,
+        remote_mapper: &DataStoreIDMapper,
+    ) -> Result<()> {
         // STEP 1) Perform the synchronization request to the other data_store.
         let local_item = self.db_access.get_local_data_item(&path)?;
         let sync_request = IntSyncRequest {
             item_path: path.clone(),
             item_sync_time: local_item.sync_time.clone(),
         };
-        let sync_request = sync_request.externalize(&self.db_access)?;
+        let sync_request = sync_request.externalize(&local_mapper);
 
-        let sync_response = from_other.request_sync(sync_request)?;
-        let sync_response = sync_response.internalize(&self.db_access)?;
+        let sync_response = from_other.sync_item(sync_request, &remote_mapper)?;
+        let sync_response = sync_response.internalize(&local_mapper);
 
         // STEP 2) Use the response in combination with our local knowledge to perform the actual
         //         synchronization actions (e.g. report conflicts).
@@ -452,15 +471,22 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         for remote_child_item in remote_child_items {
                             visited_items.insert(remote_child_item.clone());
 
-                            self.sync_from_other_store(&from_other, &path.join(remote_child_item))?;
+                            self.sync_from_other_store_recursive(
+                                &from_other,
+                                &path.join(remote_child_item),
+                                &local_mapper,
+                                &remote_mapper,
+                            )?;
                         }
                         // ...and also into local items (these should simply get deleted,
                         // but we can optimize this later on after the basic works).
                         for local_child in self.db_access.get_local_child_data_items(&path)? {
                             if !visited_items.contains(&local_child.path_component) {
-                                self.sync_from_other_store(
+                                self.sync_from_other_store_recursive(
                                     &from_other,
                                     &path.join(local_child.path_component),
+                                    &local_mapper,
+                                    &remote_mapper,
                                 )?;
                             }
                         }
@@ -508,10 +534,6 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .write_file(&target_local_path, stream_from_other)?;
 
         Ok(target_local_path)
-    }
-
-    fn get_data_stores(&self) -> metadata_db::Result<Vec<metadata_db::DataStore>> {
-        self.db_access.get_data_stores()
     }
 
     fn get_data_set(&self) -> metadata_db::Result<metadata_db::DataSet> {
@@ -1066,5 +1088,49 @@ mod tests {
         dir_should_contain(&fs_3, "", vec!["sub-1", "sub-2"]);
         dir_should_contain(&fs_3, "sub-1", vec!["file-2", "file-1"]);
         dir_should_not_contain(&fs_3, "sub-2", vec!["file-1"]);
+    }
+
+    #[test]
+    fn convert_from_and_to_external_version_vectors() {
+        let fs_1 = virtual_fs::InMemoryFS::new();
+        let data_store_1 =
+            DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-1", fs_1.clone()).unwrap();
+        let fs_2 = virtual_fs::InMemoryFS::new();
+        let data_store_2 =
+            DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-2", fs_2.clone()).unwrap();
+        let data_store_1_name = data_store_1
+            .db_access
+            .get_this_data_store()
+            .unwrap()
+            .unique_name;
+
+        let (mapper_1, mapper_2) = data_store_1.sync_data_store_lists(&data_store_2).unwrap();
+
+        // Create a vector local to store 1
+        let data_store_1_id = data_store_1
+            .db_access
+            .get_data_store(&data_store_1_name)
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut vector_on_store_1 = VersionVector::new();
+        vector_on_store_1[&data_store_1_id] = 42;
+
+        // Simulate the 'externalize and internalize' procedure to transfer it to store 2.
+        let internalized_vector_on_store_2 = mapper_2.external_to_internal(&vector_on_store_1);
+
+        // Check it...
+        let data_store_2_id = data_store_2
+            .db_access
+            .get_data_store(&data_store_1_name)
+            .unwrap()
+            .unwrap()
+            .id;
+        assert_eq!(internalized_vector_on_store_2[&data_store_2_id], 42);
+
+        // Transfer it back
+        let internalized_vector_on_store_1 =
+            mapper_1.external_to_internal(&internalized_vector_on_store_2);
+        assert_eq!(internalized_vector_on_store_1[&data_store_1_id], 42);
     }
 }
