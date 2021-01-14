@@ -36,6 +36,15 @@ impl MetadataDB {
         Ok(result)
     }
 
+    /// Performs a clean-up operation on the local database, removing any redundant information.
+    /// Should be run from time to time to decrease the DB size on disk.
+    pub fn clean_up(&self) -> Result<usize> {
+        let cleaned_sync_times = self.clean_up_local_sync_times()?;
+        diesel::sql_query("VACUUM").execute(&self.conn)?;
+
+        Ok(cleaned_sync_times)
+    }
+
     /// Creates and returns the data set stored in the open MetadataDB.
     /// Currently, exactly one data set can be stored in one database.
     pub fn create_data_set(&self, unique_name_p: &str) -> Result<DataSet> {
@@ -135,7 +144,7 @@ impl MetadataDB {
     }
 
     /// Returns the local data store of the open MetadataDB.
-    pub fn get_this_data_store(&self) -> Result<DataStore> {
+    pub fn get_local_data_store(&self) -> Result<DataStore> {
         use self::schema::data_stores::dsl::*;
 
         Ok(data_stores
@@ -149,7 +158,7 @@ impl MetadataDB {
         // Any operation involving consistency of sync-time stamps and/or parent-child relations
         // between items in the database requires a consistent view of the invariants held.
         self.conn.transaction::<_, MetadataDBError, _>(|| {
-            let local_data_store = self.get_this_data_store()?;
+            let local_data_store = self.get_local_data_store()?;
             let mut path_items = self.load_data_items_on_path(&local_data_store, &path)?;
 
             if path_items.len() == path.get_path_components().len() {
@@ -174,7 +183,7 @@ impl MetadataDB {
         // Any operation involving consistency of sync-time stamps and/or parent-child relations
         // between items in the database requires a consistent view of the invariants held.
         self.conn.transaction::<_, MetadataDBError, _>(|| {
-            let local_data_store = self.get_this_data_store()?;
+            let local_data_store = self.get_local_data_store()?;
             let dir_path_items = self.load_data_items_on_path(&local_data_store, &dir_path)?;
 
             if dir_path_items.len() == dir_path.get_path_components().len() {
@@ -210,7 +219,7 @@ impl MetadataDB {
         self.conn.transaction::<_, MetadataDBError, _>(|| {
             // We insert an item, bump the data stores version and mark all events with the version.
             self.increase_local_time()?;
-            let local_data_store = self.get_this_data_store()?;
+            let local_data_store = self.get_local_data_store()?;
             let new_time = local_data_store.time;
 
             // Load all existing items on the given path.
@@ -318,7 +327,7 @@ impl MetadataDB {
         // between items in the database requires a consistent view of the invariants held.
         self.conn.transaction::<_, MetadataDBError, _>(|| {
             // We insert an item, bump the data stores version and mark all events with the version.
-            let local_data_store = self.get_this_data_store()?;
+            let local_data_store = self.get_local_data_store()?;
 
             // Look for the item.
             let mut path_items = self.load_data_items_on_path(&local_data_store, &path)?;
@@ -345,7 +354,7 @@ impl MetadataDB {
     /// item, as this vector MUST be explicitly be generated from its child items.
     pub fn sync_local_data_item(&self, path: &RelativePath, target_item: &DBItem) -> Result<()> {
         self.conn.transaction::<_, MetadataDBError, _>(|| {
-            let local_data_store = self.get_this_data_store()?;
+            let local_data_store = self.get_local_data_store()?;
 
             // Look for existing items on this path.
             let path_items =
@@ -720,7 +729,7 @@ impl MetadataDB {
 
             // Push the parent folders last mod time
             self.increase_local_time()?;
-            let local_data_store = self.get_this_data_store()?;
+            let local_data_store = self.get_local_data_store()?;
             let new_time = local_data_store.time;
             self.add_mod_event(&parent.item, local_data_store.id, new_time)?;
 
@@ -887,6 +896,49 @@ impl MetadataDB {
             .execute(&self.conn)?;
 
         Ok(())
+    }
+
+    fn clean_up_local_sync_times(&self) -> Result<usize> {
+        self.conn.transaction(|| {
+            let local_data_store = self.get_local_data_store()?;
+            let root_item = self
+                .load_data_items_on_path(&local_data_store, &RelativePath::from_path(""))?
+                .pop()
+                .unwrap();
+
+            self.clean_up_sync_times(&root_item)
+        })
+    }
+
+    fn clean_up_sync_times(&self, parent_item: &DBItemInternal) -> Result<usize> {
+        let mut cleaned_up_items = 0;
+
+        let parent_sync_time = parent_item.sync_time.as_ref().unwrap();
+        for child_item in self.load_child_items(parent_item)? {
+            let mut times_to_keep = Vec::new();
+            for child_sync_entry in child_item.sync_time.as_ref().unwrap().iter() {
+                let (data_store_id, time) = child_sync_entry;
+                if parent_sync_time[&data_store_id] < *time {
+                    // We found a sync time component that this item must change, i.e.
+                    // it has a bigger sync time component than its parent folder.
+                    times_to_keep.push(*data_store_id);
+                }
+            }
+
+            // Clean up the item itself, i.e. remove non-keeper entries.
+            let target_db_rows = sync_times::table
+                .filter(sync_times::item_id.eq(child_item.item.id))
+                .filter(diesel::dsl::not(
+                    sync_times::data_store_id.eq_any(times_to_keep),
+                ));
+            let deleted_entries = diesel::delete(target_db_rows).execute(&self.conn)?;
+            cleaned_up_items += deleted_entries;
+
+            // Clean up the items chlid items.
+            cleaned_up_items += self.clean_up_sync_times(&child_item)?;
+        }
+
+        Ok(cleaned_up_items)
     }
 
     /// Inserts a root item for the given data store.

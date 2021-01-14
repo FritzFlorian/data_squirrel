@@ -11,7 +11,7 @@ fn create_data_store() {
     assert_eq!(data_set.unique_name, "XYZ-123");
     assert_eq!(data_set.human_name, "XYZ");
 
-    let this_data_store = data_store.db_access.get_this_data_store().unwrap();
+    let this_data_store = data_store.db_access.get_local_data_store().unwrap();
     assert_eq!(
         this_data_store.path_on_device,
         test_dir.path().canonicalize().unwrap().to_str().unwrap()
@@ -310,7 +310,7 @@ fn convert_from_and_to_external_version_vectors() {
         DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-2", fs_2.clone()).unwrap();
     let data_store_1_name = data_store_1
         .db_access
-        .get_this_data_store()
+        .get_local_data_store()
         .unwrap()
         .unique_name;
 

@@ -99,7 +99,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
     /// The local, logical time maintained in this data_store.
     pub fn local_time(&self) -> Result<i64> {
-        Ok(self.db_access.get_this_data_store()?.time)
+        Ok(self.db_access.get_local_data_store()?.time)
     }
 
     /// Re-indexes the data stored in this data_store.

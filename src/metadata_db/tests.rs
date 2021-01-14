@@ -171,6 +171,10 @@ fn correctly_inserts_synced_data_items() {
         .sync_local_data_item(&RelativePath::from_path("sub"), &target_data_item)
         .unwrap();
 
+    // We duplicate some sync times when performing the sync on the target item.
+    let cleaned_items = metadata_store.clean_up_local_sync_times().unwrap();
+    assert_eq!(cleaned_items, 1);
+
     assert_sync_time(&metadata_store, "", remote_store.id, 0);
     assert_sync_time(&metadata_store, "sub", remote_store.id, 10);
     assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 10);
@@ -192,6 +196,10 @@ fn correctly_inserts_synced_data_items() {
     assert_sync_time(&metadata_store, "", local_store.id, 5);
     assert_sync_time(&metadata_store, "sub", local_store.id, 5);
     assert_sync_time(&metadata_store, "sub/folder/file", local_store.id, 5);
+
+    // We should not yet see any duplicated sync times, as we only change parent items directly.
+    let cleaned_items = metadata_store.clean_up_local_sync_times().unwrap();
+    assert_eq!(cleaned_items, 0);
 
     // Let's query an item, change it and re-synchronize it into our local db
     let mut file = metadata_store
@@ -243,6 +251,9 @@ fn correctly_inserts_synced_data_items() {
     metadata_store
         .sync_local_data_item(&RelativePath::from_path("sub/folder"), &folder)
         .unwrap();
+
+    // Delete duplicated sync times, we simply expect it to not break anything here.
+    metadata_store.clean_up_local_sync_times().unwrap();
 
     // We expect the file below to be implicitly deleted and have the appropriate sync time.
     let item_after_update = metadata_store
