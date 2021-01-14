@@ -163,20 +163,28 @@ fn correctly_inserts_synced_data_items() {
     insert_data_item(&metadata_store, "sub/folder/file", true);
 
     // First of, lets try bumping some synchronization vector times.
-    let sync_time = VersionVector::from_initial_values(vec![(&remote_store.id, 10)]);
-    metadata_store
-        .max_sync_times_recursive(&RelativePath::from_path("sub"), &sync_time)
+    let mut target_data_item = metadata_store
+        .get_local_data_item(&RelativePath::from_path("sub"))
         .unwrap();
+    target_data_item.sync_time[&remote_store.id] = 10;
+    metadata_store
+        .sync_local_data_item(&RelativePath::from_path("sub"), &target_data_item)
+        .unwrap();
+
     assert_sync_time(&metadata_store, "", remote_store.id, 0);
     assert_sync_time(&metadata_store, "sub", remote_store.id, 10);
     assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 10);
 
     // Also try to 'partially' bump the sync times.
-    let sync_time =
-        VersionVector::from_initial_values(vec![(&local_store.id, 5), (&remote_store.id, 7)]);
-    metadata_store
-        .max_sync_times_recursive(&RelativePath::from_path(""), &sync_time)
+    let mut target_data_item = metadata_store
+        .get_local_data_item(&RelativePath::from_path(""))
         .unwrap();
+    target_data_item.sync_time[&local_store.id] = 5;
+    target_data_item.sync_time[&remote_store.id] = 7;
+    metadata_store
+        .sync_local_data_item(&RelativePath::from_path(""), &target_data_item)
+        .unwrap();
+
     assert_sync_time(&metadata_store, "", remote_store.id, 7);
     assert_sync_time(&metadata_store, "sub", remote_store.id, 10);
     assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 10);

@@ -73,6 +73,52 @@ pub struct ItemFSMetadata {
 }
 
 impl DBItem {
+    pub fn from_internal_item(item: DBItemInternal) -> Self {
+        let item_type = if item.item.is_deleted {
+            ItemType::DELETION
+        } else {
+            // Query the creation and last modification info from the metadata.
+            // (NOTE: this function expects a FULL item, i.e. all info should be present)
+            let mut meta_creation_time = VersionVector::new();
+            meta_creation_time[&item.mod_metadata.as_ref().unwrap().creator_store_id] =
+                item.mod_metadata.as_ref().unwrap().creator_store_time;
+            let mut meta_last_mod_time = VersionVector::new();
+            meta_last_mod_time[&item.mod_metadata.as_ref().unwrap().last_mod_store_id] =
+                item.mod_metadata.as_ref().unwrap().last_mod_store_time;
+
+            if item.item.is_file {
+                ItemType::FILE {
+                    metadata: Self::internal_to_external_metadata(item.fs_metadata.unwrap()),
+                    creation_time: meta_creation_time,
+                    last_mod_time: meta_last_mod_time,
+                }
+            } else {
+                // Only folders have a max_mod_time attribute.
+                ItemType::FOLDER {
+                    metadata: Self::internal_to_external_metadata(item.fs_metadata.unwrap()),
+                    creation_time: meta_creation_time,
+                    mod_time: item.mod_time.unwrap(),
+                    last_mod_time: meta_last_mod_time,
+                }
+            }
+        };
+
+        Self {
+            path_component: item.path_component.path_component.to_owned(),
+            sync_time: item.sync_time.unwrap(),
+            content: item_type,
+        }
+    }
+    fn internal_to_external_metadata(metadata: FileSystemMetadata) -> ItemFSMetadata {
+        ItemFSMetadata {
+            case_sensitive_name: metadata.case_sensitive_name,
+
+            mod_time: metadata.mod_time,
+            creation_time: metadata.creation_time,
+            hash: metadata.hash,
+        }
+    }
+
     pub fn is_deletion(&self) -> bool {
         matches!(self.content, ItemType::DELETION { .. })
     }

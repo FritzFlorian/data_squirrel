@@ -11,12 +11,12 @@ mod errors;
 pub use self::errors::*;
 mod db_migration;
 
+use crate::fs_interaction::relative_path::RelativePath;
+use crate::version_vector::VersionVector;
+
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sqlite::SqliteConnection;
-
-use fs_interaction::relative_path::RelativePath;
-use version_vector::VersionVector;
 
 pub struct MetadataDB {
     conn: SqliteConnection,
@@ -85,7 +85,7 @@ impl MetadataDB {
         Ok(result)
     }
 
-    // Searches for the given data store and returns it if it exists.
+    /// Searches for the given data store and returns it if it exists.
     pub fn get_data_store(&self, unique_name: &str) -> Result<Option<DataStore>> {
         // We currently only allow EXACTLY ONE data_set, thus we do not need to join here.
         let result = data_stores::table
@@ -98,12 +98,12 @@ impl MetadataDB {
     /// Creates a new data store in the open MetadataDB.
     /// At most one data store must be the local one and this methods reports an consistency
     /// error if violated.
-    pub fn create_data_store(&self, new_store: &data_store::InsertFull) -> Result<DataStore> {
+    pub fn create_data_store(&self, data_store: &data_store::InsertFull) -> Result<DataStore> {
         use diesel::dsl::*;
 
         let result = self.conn.transaction(|| {
             // Check DB consistency (for only ONE local data store)
-            if new_store.is_this_store {
+            if data_store.is_this_store {
                 let this_store_already_exists = select(exists(
                     data_stores::table.filter(data_stores::is_this_store.eq(true)),
                 ))
@@ -115,66 +115,20 @@ impl MetadataDB {
                 }
             }
 
-            // Insert new entry
             diesel::insert_into(data_stores::table)
-                .values(new_store)
+                .values(data_store)
                 .execute(&self.conn)?;
-
-            let result = data_stores::table
-                .filter(data_stores::unique_name.eq(&new_store.unique_name))
+            let inserted_data_store = data_stores::table
+                .filter(data_stores::unique_name.eq(&data_store.unique_name))
                 .first::<DataStore>(&self.conn)?;
 
             // Ensure that we always have a root-directory in the local data store
             // (This simplifies A LOT of functions, as we spare the special case for no parent dir).
-            if new_store.is_this_store {
-                diesel::insert_into(path_components::table)
-                    .values(path_component::InsertFull {
-                        path_component: "",
-                        parent_component_id: None,
-                    })
-                    .execute(&self.conn)?;
-                let root_path = path_components::table
-                    .filter(path_components::parent_component_id.is_null())
-                    .first::<PathComponent>(&self.conn)?;
-
-                diesel::insert_into(items::table)
-                    .values(item::InsertFull {
-                        data_store_id: result.id,
-                        path_component_id: root_path.id,
-
-                        is_file: false,
-                        is_deleted: false,
-                    })
-                    .execute(&self.conn)?;
-                let root_item = items::table
-                    .filter(items::path_component_id.eq(root_path.id))
-                    .filter(items::data_store_id.eq(result.id))
-                    .first::<Item>(&self.conn)?;
-
-                diesel::insert_into(mod_metadatas::table)
-                    .values(mod_metadata::InsertFull {
-                        id: root_item.id,
-
-                        creator_store_id: result.id,
-                        creator_store_time: 0,
-
-                        last_mod_store_id: result.id,
-                        last_mod_store_time: 0,
-                    })
-                    .execute(&self.conn)?;
-                diesel::insert_into(file_system_metadatas::table)
-                    .values(file_system_metadata::InsertFull {
-                        id: root_item.id,
-
-                        case_sensitive_name: "",
-                        creation_time: chrono::NaiveDateTime::from_timestamp(0, 0),
-                        mod_time: chrono::NaiveDateTime::from_timestamp(0, 0),
-                        hash: "",
-                    })
-                    .execute(&self.conn)?;
+            if data_store.is_this_store {
+                self.create_root_item(&inserted_data_store)?;
             }
 
-            Ok(result)
+            Ok(inserted_data_store)
         })?;
 
         Ok(result)
@@ -198,28 +152,16 @@ impl MetadataDB {
             let local_data_store = self.get_this_data_store()?;
             let mut path_items = self.load_data_items_on_path(&local_data_store, &path)?;
 
-            // Sync times can increase down the chain of data_items.
-            // Mod times (for now) are stored completely in the data_item.
-            let local_data_store = self.get_this_data_store()?;
-            let local_time = local_data_store.time;
-
-            let mut final_sync_time = VersionVector::<i64>::new();
-            final_sync_time[&local_data_store.id] = local_time;
-
-            for path_item in path_items.iter_mut() {
-                self.load_sync_time_for_item(path_item)?;
-                final_sync_time.max(&path_item.sync_time.as_ref().unwrap());
-            }
-
             if path_items.len() == path.get_path_components().len() {
                 // The item has an actual entry in the db, inspect it further.
                 let target_item = path_items.pop().unwrap();
-                Ok(self.internal_to_external_item(target_item, final_sync_time)?)
+                Ok(DBItem::from_internal_item(target_item))
             } else {
                 // The item has no more entry in the db, thus we 'create' a deletion notice.
+                let last_db_entry = path_items.pop().unwrap();
                 Ok(DBItem {
                     path_component: path.name().to_lowercase(),
-                    sync_time: final_sync_time,
+                    sync_time: last_db_entry.sync_time.unwrap(),
 
                     content: ItemType::DELETION,
                 })
@@ -227,178 +169,23 @@ impl MetadataDB {
         })
     }
 
-    fn load_data_items_on_path(
-        &self,
-        for_data_store: &DataStore,
-        path: &RelativePath,
-    ) -> Result<Vec<DBItemInternal>> {
-        // We handle all path's in lower case in here!
-        let path = path.to_lower_case();
-
-        // Note: Maybe re-work with 'WITH RECURSIVE' queries directly in sqlite.
-        //       Wait for actual performance issues before trying to do this.
-        let mut result = Vec::<DBItemInternal>::with_capacity(path.get_path_components().len());
-
-        for path_component in path.get_path_components() {
-            let parent_id = result.last().map(|item| item.path_component.id);
-            let component_db_item = if let Some(parent_path_component_id) = parent_id {
-                path_components::table
-                    .filter(path_components::path_component.eq(path_component))
-                    .filter(path_components::parent_component_id.eq(Some(parent_path_component_id)))
-                    .inner_join(items::table)
-                    .filter(items::data_store_id.eq(for_data_store.id))
-                    .first::<(PathComponent, Item)>(&self.conn)
-                    .optional()?
-            } else {
-                path_components::table
-                    .filter(path_components::path_component.eq(path_component))
-                    .filter(path_components::parent_component_id.is_null())
-                    .inner_join(items::table)
-                    .filter(items::data_store_id.eq(for_data_store.id))
-                    .first::<(PathComponent, Item)>(&self.conn)
-                    .optional()?
-            };
-
-            if let Some((path_component, item)) = component_db_item {
-                let fs_metadata = file_system_metadatas::table
-                    .find(item.id)
-                    .first::<FileSystemMetadata>(&self.conn)
-                    .optional()?;
-                let mod_metadata = mod_metadatas::table
-                    .find(item.id)
-                    .first::<ModMetadata>(&self.conn)
-                    .optional()?;
-                let current_item =
-                    DBItemInternal::from_db_query(path_component, item, fs_metadata, mod_metadata);
-                result.push(current_item);
-            } else {
-                break;
-            }
-        }
-
-        Ok(result)
-    }
-    fn load_sync_time_for_item(&self, data_item: &mut DBItemInternal) -> Result<()> {
-        let sync_time_entries: Vec<SyncTime> = sync_times::table
-            .filter(sync_times::item_id.eq(data_item.item.id))
-            .load::<SyncTime>(&self.conn)?;
-
-        let mut result_vector = VersionVector::<i64>::new();
-        for sync_time in sync_time_entries {
-            result_vector[&sync_time.data_store_id] = sync_time.time;
-        }
-
-        data_item.sync_time = Some(result_vector);
-
-        Ok(())
-    }
-    fn load_max_mod_time_for_folder(&self, data_item: &mut DBItemInternal) -> Result<()> {
-        if data_item.item.is_file || data_item.item.is_deleted {
-            // Skip the loading, makes only sense for folders that exist
-        } else {
-            let mod_time_entries: Vec<ModTime> = mod_times::table
-                .filter(mod_times::mod_metadata_id.eq(data_item.mod_metadata.as_ref().unwrap().id))
-                .load::<ModTime>(&self.conn)?;
-
-            let mut result_vector = VersionVector::<i64>::new();
-            for mod_time in mod_time_entries {
-                result_vector[&mod_time.data_store_id] = mod_time.time;
-            }
-
-            data_item.mod_time = Some(result_vector);
-        }
-
-        Ok(())
-    }
-
-    fn internal_to_external_item(
-        &self,
-        mut item: DBItemInternal,
-        parent_directory_sync_time: VersionVector<i64>,
-    ) -> Result<DBItem> {
-        // Load final sync-time, must be present for any item type.
-        self.load_sync_time_for_item(&mut item)?;
-        let mut item_sync_time = parent_directory_sync_time;
-        item_sync_time.max(&item.sync_time.as_ref().unwrap());
-
-        let item_type = if item.item.is_deleted {
-            ItemType::DELETION
-        } else {
-            // Query the creation and last modification info from the metadata.
-            // (NOTE: this function expects a FULL item, i.e. all info should be present)
-            let mut meta_creation_time = VersionVector::new();
-            meta_creation_time[&item.mod_metadata.as_ref().unwrap().creator_store_id] =
-                item.mod_metadata.as_ref().unwrap().creator_store_time;
-            let mut meta_last_mod_time = VersionVector::new();
-            meta_last_mod_time[&item.mod_metadata.as_ref().unwrap().last_mod_store_id] =
-                item.mod_metadata.as_ref().unwrap().last_mod_store_time;
-
-            if item.item.is_file {
-                ItemType::FILE {
-                    metadata: Self::internal_to_external_metadata(item.fs_metadata.unwrap()),
-                    creation_time: meta_creation_time,
-                    last_mod_time: meta_last_mod_time,
-                }
-            } else {
-                // Only folders have a max_mod_time attribute.
-                self.load_max_mod_time_for_folder(&mut item)?;
-                ItemType::FOLDER {
-                    metadata: Self::internal_to_external_metadata(item.fs_metadata.unwrap()),
-                    creation_time: meta_creation_time,
-                    mod_time: item.mod_time.unwrap(),
-                    last_mod_time: meta_last_mod_time,
-                }
-            }
-        };
-
-        Ok(DBItem {
-            path_component: item.path_component.path_component.to_owned(),
-            sync_time: item_sync_time,
-            content: item_type,
-        })
-    }
-    fn internal_to_external_metadata(metadata: FileSystemMetadata) -> ItemFSMetadata {
-        ItemFSMetadata {
-            case_sensitive_name: metadata.case_sensitive_name,
-
-            mod_time: metadata.mod_time,
-            creation_time: metadata.creation_time,
-            hash: metadata.hash,
-        }
-    }
-
-    /// Queries all child items of a given DB item.
+    /// Queries all child items of a given path that are present in the DB.
     pub fn get_local_child_data_items(&self, dir_path: &RelativePath) -> Result<Vec<DBItem>> {
         // Any operation involving consistency of sync-time stamps and/or parent-child relations
         // between items in the database requires a consistent view of the invariants held.
         self.conn.transaction::<_, MetadataDBError, _>(|| {
             let local_data_store = self.get_this_data_store()?;
-            let mut dir_path_items = self.load_data_items_on_path(&local_data_store, &dir_path)?;
+            let dir_path_items = self.load_data_items_on_path(&local_data_store, &dir_path)?;
 
             if dir_path_items.len() == dir_path.get_path_components().len() {
                 // The parent directory exists, go and inspect it further.
-
-                // Sync times can increase down the chain of data_items.
-                // Mod times (for now) are stored completely in the data_items.
-                let local_data_store = self.get_this_data_store()?;
-                let local_time = local_data_store.time;
-
-                let mut dir_sync_time = VersionVector::<i64>::new();
-                dir_sync_time[&local_data_store.id] = local_time;
-                for path_item in dir_path_items.iter_mut() {
-                    self.load_sync_time_for_item(path_item)?;
-                    dir_sync_time.max(&path_item.sync_time.as_ref().unwrap());
-                }
-
                 // The last item in the chain of DB entries is the desired folder item.
                 let dir_item = dir_path_items.last().unwrap();
 
                 // Query its content/children.
                 self.load_child_items(&dir_item)?
                     .into_iter()
-                    .map(|internal_item| {
-                        Ok(self.internal_to_external_item(internal_item, dir_sync_time.clone())?)
-                    })
+                    .map(|internal_item| Ok(DBItem::from_internal_item(internal_item)))
                     .collect()
             } else {
                 // The parent path is not in the DB, thus we have no child items.
@@ -407,33 +194,8 @@ impl MetadataDB {
         })
     }
 
-    fn load_child_items(&self, parent_item: &DBItemInternal) -> Result<Vec<DBItemInternal>> {
-        let dir_entries = path_components::table
-            .filter(path_components::parent_component_id.eq(parent_item.path_component.id))
-            .inner_join(items::table)
-            .filter(items::data_store_id.eq(parent_item.item.data_store_id))
-            .load::<(PathComponent, Item)>(&self.conn)?;
-
-        let child_items: Result<Vec<_>> = dir_entries
-            .into_iter()
-            .map(|(path, item)| {
-                let fs_metadata = file_system_metadatas::table
-                    .find(item.id)
-                    .first::<FileSystemMetadata>(&self.conn)
-                    .optional()?;
-                let mod_metadata = mod_metadatas::table
-                    .find(item.id)
-                    .first::<ModMetadata>(&self.conn)
-                    .optional()?;
-
-                let internal_item =
-                    DBItemInternal::from_db_query(path, item, fs_metadata, mod_metadata);
-                Ok(internal_item)
-            })
-            .collect();
-        child_items
-    }
-
+    /// LOCAL DATA STORE EVENT, i.e. this is used to record changes of local data_items on disk.
+    ///
     /// Modifies a data item for the local data store (making sure versions stay consistent).
     /// The method implicitly assigns the appropriate creation information and time stamps.
     /// The method implicitly assigns an appropriate last modification time to the item.
@@ -503,12 +265,10 @@ impl MetadataDB {
                     })
                     .execute(&self.conn)?;
 
-                let new_item = items::table
+                items::table
                     .filter(items::path_component_id.eq(path_component.id))
                     .filter(items::data_store_id.eq(local_data_store.id))
-                    .first::<Item>(&self.conn)?;
-
-                new_item
+                    .first::<Item>(&self.conn)?
             };
 
             // Associate Metadata with the given entry (...or update an existing one, e.g.
@@ -547,38 +307,33 @@ impl MetadataDB {
         })
     }
 
-    // Given a vector of path items and the expected depth of the target_item on this path,
-    // return it's parent directory and optionally the target_items itself.
-    //
-    // Returns an Error if even the parent_item does not exist.
-    //
-    // 'Normalizes' the root directory, i.e. it returns the root directory as the parent of the
-    // root directory.
-    fn extract_parent_dir_and_item(
-        mut path_items: Vec<DBItemInternal>,
-        target_item_depth: usize,
-    ) -> Result<(DBItemInternal, Option<DBItemInternal>)> {
-        if target_item_depth == 1 {
-            // Special case for root directory.
-            let parent_dir_item = path_items.pop().unwrap();
-            let existing_item = Some(parent_dir_item.clone());
+    /// LOCAL DATA STORE EVENT, i.e. this is used to record changes of local data_items on disk.
+    ///
+    /// Marks the given data item (and all its child items) as being deleted.
+    /// This keeps their entries in the DB, but converts them to deletion notices.
+    ///
+    /// Correctly adds modification time stamps to the affected parent folders.
+    pub fn delete_local_data_item(&self, path: &RelativePath) -> Result<usize> {
+        // Any operation involving consistency of sync-time stamps and/or parent-child relations
+        // between items in the database requires a consistent view of the invariants held.
+        self.conn.transaction::<_, MetadataDBError, _>(|| {
+            // We insert an item, bump the data stores version and mark all events with the version.
+            let local_data_store = self.get_this_data_store()?;
 
-            Ok((parent_dir_item, existing_item))
-        } else if path_items.len() == target_item_depth {
-            let existing_item = Some(path_items.pop().unwrap());
-            let parent_dir_item = path_items.pop().unwrap();
+            // Look for the item.
+            let mut path_items = self.load_data_items_on_path(&local_data_store, &path)?;
 
-            Ok((parent_dir_item, existing_item))
-        } else if path_items.len() == target_item_depth - 1 {
-            let existing_item = None;
-            let parent_dir_item = path_items.pop().unwrap();
+            if path_items.len() != path.get_path_components().len() {
+                // We have no parent item, i.e. this is already deleted.
+                Ok(0)
+            } else {
+                let item = path_items.pop().unwrap();
+                let parent = path_items.pop().unwrap();
 
-            Ok((parent_dir_item, existing_item))
-        } else {
-            Err(MetadataDBError::ViolatesDBConsistency {
-                message: "Must not insert data_item without existing parent item (i.e. no file without a parent folder)!"
-            })
-        }
+                let deleted = self.delete_local_data_item_recursive(&parent, &item)?;
+                Ok(deleted)
+            }
+        })
     }
 
     /// Syncs a local data item, i.e. updating its metadata, sync- and mod time.
@@ -593,15 +348,8 @@ impl MetadataDB {
             let local_data_store = self.get_this_data_store()?;
 
             // Look for existing items on this path.
-            let mut path_items =
+            let path_items =
                 self.load_data_items_on_path(&local_data_store, &path)?;
-
-            // Get their maximum sync time, which in turn is the sync time of the given path.
-            let mut current_item_sync_time = VersionVector::new();
-            for mut parent_item in path_items.iter_mut() {
-                self.load_sync_time_for_item(&mut parent_item)?;
-                current_item_sync_time.max(&parent_item.sync_time.as_ref().unwrap());
-            }
 
             // We are especially interested in the parent directory and a potentially existing item.
             let (parent_dir_item, existing_item) =
@@ -627,7 +375,7 @@ impl MetadataDB {
                 if  item_will_be_deleted || item_no_longer_folder {
                     // In case a previous folder now is none-anymore, we need to clean out
                     // all its children from the DB (completely remove them).
-                    self.delete_children_recursive(&existing_item.item, true)?;
+                    self.delete_db_entries_recursive(&existing_item.item, true)?;
                 }
 
                 // Remove un-needed entries for deleted items.
@@ -690,7 +438,7 @@ impl MetadataDB {
 
                 // Mod Metadata is tricky, as we want to e.g. keep the mod_times associated with
                 // a folder.
-                let mod_metadata_exits = existing_item.is_some() && !existing_item.unwrap().item.is_deleted;
+                let mod_metadata_exits = existing_item.is_some() && !existing_item.as_ref().unwrap().item.is_deleted;
                 if mod_metadata_exits {
                     diesel::update(mod_metadatas::table.find(item.id))
                         .set(mod_metadata::UpdateCreator{
@@ -713,11 +461,16 @@ impl MetadataDB {
                 // Simply set the last_mod_time and let it bump the parent items mod times.
                 // We never directly sync the mod_times (max in folders), these should always be
                 // implicitly set by child items being updated.
-                self.add_mod_event(&item, target_item.last_mod_store_id(), target_item.last_mod_store_time())?
+                self.add_mod_event(&item, target_item.last_mod_store_id(), target_item.last_mod_store_time())?;
             }
 
             // ALL items in the db hold a sync time, thus always update it.
-            let mut target_sync_time = current_item_sync_time;
+            // Sync times MUST always increase, i.e. we never loose information on a sync operation.
+            let mut target_sync_time = if let Some(existing_item) = existing_item{
+                existing_item.sync_time.unwrap()
+            } else {
+                parent_dir_item.sync_time.unwrap()
+            };
             target_sync_time.max(&target_item.sync_time);
             self.update_sync_times(&item, &target_sync_time)?;
 
@@ -725,82 +478,192 @@ impl MetadataDB {
         })
     }
 
-    /// Sets the sync time of the given path (and all child paths) to be the maximum of their
-    /// current sync time and the given version vector.
-    pub fn max_sync_times_recursive(
+    /// Load all existing internal items on the given path.
+    ///
+    /// If there are less items than the given path, the procedure simply stops and returns an
+    /// incomplete list. It is the callers responsibility to check for this.
+    /// Often used with extract_parent_dir_and_item to make sure the path was complete in the DB.
+    ///
+    /// Automatically loads sync and mod times if present.
+    fn load_data_items_on_path(
         &self,
+        for_data_store: &DataStore,
         path: &RelativePath,
-        target_sync_time: &VersionVector<i64>,
-    ) -> Result<()> {
-        // Any operation involving consistency of sync-time stamps and/or parent-child relations
-        // between items in the database requires a consistent view of the invariants held.
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
-            let local_data_store = self.get_this_data_store()?;
+    ) -> Result<Vec<DBItemInternal>> {
+        // We handle all path's in lower case in here!
+        let path = path.to_lower_case();
 
-            // Look for parent item.
-            let mut items_path_to_target =
-                self.load_data_items_on_path(&local_data_store, &path)?;
+        // Required for sync time compression in the DB.
+        let mut current_sync_time = VersionVector::<i64>::new();
+        current_sync_time[&for_data_store.id] = for_data_store.time;
 
-            if items_path_to_target.len() < path.get_path_components().len() {
-                // In case this is an implicit deletion, we try to create it with the new time.
-                if items_path_to_target.len() < path.get_path_components().len() - 1 {
-                    Err(MetadataDBError::ViolatesDBConsistency {
-                        message: "Must not update sync times of non existing db entries!",
-                    })
-                } else {
-                    let mut local_item = self.get_local_data_item(&path)?;
-                    local_item.sync_time.max(target_sync_time);
-                    self.sync_local_data_item(&path, &local_item)?;
+        // Note: Maybe re-work with 'WITH RECURSIVE' queries directly in sqlite.
+        //       Wait for actual performance issues before trying to do this.
+        let mut result = Vec::<DBItemInternal>::with_capacity(path.get_path_components().len());
 
-                    Ok(())
-                }
+        for path_component in path.get_path_components() {
+            let parent_id = result.last().map(|item| item.path_component.id);
+            let component_db_item = if let Some(parent_path_component_id) = parent_id {
+                path_components::table
+                    .filter(path_components::path_component.eq(path_component))
+                    .filter(path_components::parent_component_id.eq(Some(parent_path_component_id)))
+                    .inner_join(items::table)
+                    .filter(items::data_store_id.eq(for_data_store.id))
+                    .first::<(PathComponent, Item)>(&self.conn)
+                    .optional()?
             } else {
-                let mut folder_sync_time = VersionVector::new();
-                folder_sync_time[&local_data_store.id] = local_data_store.time;
-                for mut parent_item in &mut items_path_to_target {
-                    self.load_sync_time_for_item(&mut parent_item)?;
-                    folder_sync_time.max(&parent_item.sync_time.as_ref().unwrap());
-                }
+                path_components::table
+                    .filter(path_components::path_component.eq(path_component))
+                    .filter(path_components::parent_component_id.is_null())
+                    .inner_join(items::table)
+                    .filter(items::data_store_id.eq(for_data_store.id))
+                    .first::<(PathComponent, Item)>(&self.conn)
+                    .optional()?
+            };
 
-                self.max_sync_times_recursive_internal(
-                    items_path_to_target.pop().unwrap(),
-                    &folder_sync_time,
-                    &target_sync_time,
-                )
+            if let Some((path_component, item)) = component_db_item {
+                let current_item = self.load_item(path_component, item, &current_sync_time)?;
+                current_sync_time = current_item.sync_time.as_ref().unwrap().clone();
+
+                result.push(current_item);
+            } else {
+                break;
             }
-        })
+        }
+
+        Ok(result)
     }
-    // FIXME: This system needs a 'BIG TIME' update at both points, the individual item sync and
-    //        the we sync each child type!!!
-    //        This gets especially bad when we want to turn on compression for the DB entries.
-    fn max_sync_times_recursive_internal(
+
+    /// Loads all child items of the given internal db item.
+    fn load_child_items(&self, parent_item: &DBItemInternal) -> Result<Vec<DBItemInternal>> {
+        let dir_entries = path_components::table
+            .filter(path_components::parent_component_id.eq(parent_item.path_component.id))
+            .inner_join(items::table)
+            .filter(items::data_store_id.eq(parent_item.item.data_store_id))
+            .load::<(PathComponent, Item)>(&self.conn)?;
+
+        let child_items: Result<Vec<_>> = dir_entries
+            .into_iter()
+            .map(|(path, item)| {
+                let internal_item =
+                    self.load_item(path, item, &parent_item.sync_time.as_ref().unwrap())?;
+                Ok(internal_item)
+            })
+            .collect();
+        child_items
+    }
+
+    // Given a vector of path items and the expected depth of the target_item on this path,
+    // return it's parent directory and optionally the target_items itself.
+    //
+    // Returns an Error if even the parent_item does not exist.
+    //
+    // 'Normalizes' the root directory, i.e. it returns the root directory as the parent of the
+    // root directory.
+    fn extract_parent_dir_and_item(
+        mut path_items: Vec<DBItemInternal>,
+        target_item_depth: usize,
+    ) -> Result<(DBItemInternal, Option<DBItemInternal>)> {
+        if target_item_depth == 1 {
+            // Special case for root directory.
+            let parent_dir_item = path_items.pop().unwrap();
+            let existing_item = Some(parent_dir_item.clone());
+
+            Ok((parent_dir_item, existing_item))
+        } else if path_items.len() == target_item_depth {
+            let existing_item = Some(path_items.pop().unwrap());
+            let parent_dir_item = path_items.pop().unwrap();
+
+            Ok((parent_dir_item, existing_item))
+        } else if path_items.len() == target_item_depth - 1 {
+            let existing_item = None;
+            let parent_dir_item = path_items.pop().unwrap();
+
+            Ok((parent_dir_item, existing_item))
+        } else {
+            Err(MetadataDBError::ViolatesDBConsistency {
+                message: "Must not insert data_item without existing parent item (i.e. no file without a parent folder)!"
+            })
+        }
+    }
+
+    /// Loads the remaining metadata for the given DB item (metadata entries and sync/mod times).
+    /// Returns the complete internal item.
+    fn load_item(
         &self,
-        mut item: DBItemInternal,
-        folder_sync_time: &VersionVector<i64>,
-        target_sync_time: &VersionVector<i64>,
-    ) -> Result<()> {
-        self.load_sync_time_for_item(&mut item)?;
+        path_component: PathComponent,
+        item: Item,
+        parent_sync_time: &VersionVector<i64>,
+    ) -> Result<DBItemInternal> {
+        let fs_metadata = file_system_metadatas::table
+            .find(item.id)
+            .first::<FileSystemMetadata>(&self.conn)
+            .optional()?;
+        let mod_metadata = mod_metadatas::table
+            .find(item.id)
+            .first::<ModMetadata>(&self.conn)
+            .optional()?;
 
-        let mut max_sync_time = item.sync_time.as_ref().unwrap().clone();
-        max_sync_time.max(&target_sync_time);
-        max_sync_time.max(&folder_sync_time);
-        self.update_sync_times(&item.item, &max_sync_time)?;
+        let mut current_item =
+            DBItemInternal::from_db_query(path_component, item, fs_metadata, mod_metadata);
 
-        if !item.item.is_file {
-            // Search all child entries...
-            let child_items = self.load_child_items(&item)?;
-            for child_item in child_items {
-                self.max_sync_times_recursive_internal(
-                    child_item,
-                    &max_sync_time,
-                    &target_sync_time,
-                )?;
+        // Always load the times from the DB in here. This way we can keep invariants on
+        // DB compression (e.g. only store changed sync/mod times relative to parent)
+        // inside this loading layer.
+        if current_item.mod_metadata.is_some() {
+            self.load_max_mod_time_for_folder(&mut current_item)?;
+        }
+        self.load_sync_time_for_item(&mut current_item)?;
+        current_item
+            .sync_time
+            .as_mut()
+            .unwrap()
+            .max(&parent_sync_time);
+
+        Ok(current_item)
+    }
+
+    /// Loads the sync time vector stored in the DB for this item.
+    /// This only returns what is stored ON DISK. To get the final sync time of the item
+    /// it must be determined by max(parent_sync, item_sync).
+    fn load_sync_time_for_item(&self, data_item: &mut DBItemInternal) -> Result<()> {
+        let sync_time_entries: Vec<SyncTime> = sync_times::table
+            .filter(sync_times::item_id.eq(data_item.item.id))
+            .load::<SyncTime>(&self.conn)?;
+
+        let mut result_vector = VersionVector::<i64>::new();
+        for sync_time in sync_time_entries {
+            result_vector[&sync_time.data_store_id] = sync_time.time;
+        }
+
+        data_item.sync_time = Some(result_vector);
+
+        Ok(())
+    }
+
+    /// Loads the mod time vector stored in the DB for this item.
+    /// For now this will be the full vector, but we might change this in later iterations.
+    fn load_max_mod_time_for_folder(&self, data_item: &mut DBItemInternal) -> Result<()> {
+        if data_item.item.is_file || data_item.item.is_deleted {
+            // Skip the loading, makes only sense for folders that exist
+        } else {
+            let mod_time_entries: Vec<ModTime> = mod_times::table
+                .filter(mod_times::mod_metadata_id.eq(data_item.mod_metadata.as_ref().unwrap().id))
+                .load::<ModTime>(&self.conn)?;
+
+            let mut result_vector = VersionVector::<i64>::new();
+            for mod_time in mod_time_entries {
+                result_vector[&mod_time.data_store_id] = mod_time.time;
             }
+
+            data_item.mod_time = Some(result_vector);
         }
 
         Ok(())
     }
 
+    /// Inserts the given path_component into the DB if it does not already exist.
+    /// Returns the - now existing - path_component DB entry.
     fn ensure_path_exists(&self, name: &str, parent: &PathComponent) -> Result<PathComponent> {
         let name = name.to_lowercase();
 
@@ -827,28 +690,10 @@ impl MetadataDB {
         Ok(new_path)
     }
 
-    pub fn delete_local_data_item(&self, path: &RelativePath) -> Result<usize> {
-        // Any operation involving consistency of sync-time stamps and/or parent-child relations
-        // between items in the database requires a consistent view of the invariants held.
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
-            // We insert an item, bump the data stores version and mark all events with the version.
-            let local_data_store = self.get_this_data_store()?;
-
-            // Look for the item.
-            let mut path_items = self.load_data_items_on_path(&local_data_store, &path)?;
-
-            if path_items.len() != path.get_path_components().len() {
-                // We have no parent item, i.e. this is already deleted.
-                Ok(0)
-            } else {
-                let item = path_items.pop().unwrap();
-                let parent = path_items.pop().unwrap();
-
-                let deleted = self.delete_local_data_item_recursive(&parent, &item)?;
-                Ok(deleted)
-            }
-        })
-    }
+    /// Marks the given item and all its child items as deleted.
+    /// This leaves their entries in the DB in the form of deletion notices.
+    ///
+    /// Correctly adds modification time stamps to the affected parent folders.
     fn delete_local_data_item_recursive(
         &self,
         parent: &DBItemInternal,
@@ -897,7 +742,10 @@ impl MetadataDB {
         Ok(deleted)
     }
 
-    fn delete_children_recursive(&self, item: &Item, is_top_item: bool) -> Result<()> {
+    /// Deletes all child DB entries of the given item.
+    /// If passed delete_given_item == true: Also deletes the given item from the DB.
+    /// If passed delete_given_item == false: Only deletes the child items from the DB.
+    fn delete_db_entries_recursive(&self, item: &Item, delete_given_item: bool) -> Result<()> {
         // Make sure to delete children of folders recursively
         if !item.is_file {
             let dir_entries = path_components::table
@@ -907,11 +755,11 @@ impl MetadataDB {
                 .load::<(PathComponent, Item)>(&self.conn)?;
 
             for (_path, item) in dir_entries {
-                self.delete_children_recursive(&item, false)?;
+                self.delete_db_entries_recursive(&item, false)?;
             }
         }
 
-        if !is_top_item {
+        if !delete_given_item {
             // For child items we remove everything from the DB (as it would be cleaned up anyways).
             // Mod times, sync times and metadata should be deleted by cascade rules.
             diesel::delete(items::table.find(item.id)).execute(&self.conn)?;
@@ -1022,6 +870,8 @@ impl MetadataDB {
 
     /// Updates the sync times of an DB entry by replacing all
     /// existing entries with the given vector entries.
+    ///
+    /// DOES NOT remove non-mentioned entries.
     fn update_sync_times(&self, item: &Item, new_sync_times: &VersionVector<i64>) -> Result<()> {
         let new_db_entries: Vec<_> = new_sync_times
             .iter()
@@ -1039,6 +889,66 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Inserts a root item for the given data store.
+    /// This includes associated metadata entries.
+    fn create_root_item(&self, data_store: &DataStore) -> Result<()> {
+        let root_path = path_components::table
+            .filter(path_components::parent_component_id.is_null())
+            .first::<PathComponent>(&self.conn)
+            .optional()?;
+        let root_path = if let Some(root_path) = root_path {
+            root_path
+        } else {
+            diesel::insert_into(path_components::table)
+                .values(path_component::InsertFull {
+                    path_component: "",
+                    parent_component_id: None,
+                })
+                .execute(&self.conn)?;
+            path_components::table
+                .filter(path_components::parent_component_id.is_null())
+                .first::<PathComponent>(&self.conn)?
+        };
+
+        diesel::insert_into(items::table)
+            .values(item::InsertFull {
+                data_store_id: data_store.id,
+                path_component_id: root_path.id,
+
+                is_file: false,
+                is_deleted: false,
+            })
+            .execute(&self.conn)?;
+        let root_item = items::table
+            .filter(items::path_component_id.eq(root_path.id))
+            .filter(items::data_store_id.eq(data_store.id))
+            .first::<Item>(&self.conn)?;
+
+        diesel::insert_into(mod_metadatas::table)
+            .values(mod_metadata::InsertFull {
+                id: root_item.id,
+
+                creator_store_id: data_store.id,
+                creator_store_time: 0,
+
+                last_mod_store_id: data_store.id,
+                last_mod_store_time: 0,
+            })
+            .execute(&self.conn)?;
+        diesel::insert_into(file_system_metadatas::table)
+            .values(file_system_metadata::InsertFull {
+                id: root_item.id,
+
+                case_sensitive_name: "",
+                creation_time: chrono::NaiveDateTime::from_timestamp(0, 0),
+                mod_time: chrono::NaiveDateTime::from_timestamp(0, 0),
+                hash: "",
+            })
+            .execute(&self.conn)?;
+
+        Ok(())
+    }
+
     /// Helper that increases the version of the local data store.
     /// Frequently used when working with data items.
     fn increase_local_time(&self) -> Result<()> {
@@ -1050,6 +960,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Upgrades the DB to the most recent schema version.
     fn upgrade_db(&self) -> db_migration::Result<()> {
         self.conn
             .transaction(|| db_migration::upgrade_db(&self.conn))?;
@@ -1057,6 +968,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Changes the connection DB settings to our default usage pattern.
     fn default_db_settings(&self) -> Result<()> {
         sql_query("PRAGMA locking_mode = EXCLUSIVE").execute(&self.conn)?;
         sql_query("PRAGMA journal_mode = WAL").execute(&self.conn)?;

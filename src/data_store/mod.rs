@@ -286,8 +286,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             IntSyncAction::UpToDate => {
                 // If we are up-to-date it is rather simple, we integrate the knowledge that
                 // of the other device on 'how up to date' the directory is and we are done.
-                self.db_access
-                    .max_sync_times_recursive(&path, &sync_response.sync_time)?;
+                let mut target_item = local_item;
+                target_item.sync_time.max(&sync_response.sync_time);
+                self.db_access.sync_local_data_item(&path, &target_item)?;
             }
             IntSyncAction::UpdateRequired(sync_content) => {
                 match sync_content {
@@ -295,8 +296,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         if local_item.is_deletion() {
                             // Both agree that the file should be deleted. Ignore any potential
                             // conflicts, just settle and be happy that we agree on the state.
-                            self.db_access
-                                .max_sync_times_recursive(&path, &sync_response.sync_time)?;
+                            let mut target_item = local_item;
+                            target_item.sync_time.max(&sync_response.sync_time);
+                            self.db_access.sync_local_data_item(&path, &target_item)?;
                         } else if local_item.creation_time() <= &sync_response.sync_time {
                             // The remote deletion notice is targeting our local file/folder.
                             if local_item.mod_time() <= &sync_response.sync_time {
@@ -324,8 +326,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                             // not know about our local file, as the local file was created
                             // logically independent of the other copy.
                             // Just do nothing more than take up the target sync time.
-                            self.db_access
-                                .max_sync_times_recursive(&path, &sync_response.sync_time)?;
+                            let mut target_item = local_item;
+                            target_item.sync_time.max(&sync_response.sync_time);
+                            self.db_access.sync_local_data_item(&path, &target_item)?;
                         }
                     }
                     IntSyncContent::File {
