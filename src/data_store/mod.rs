@@ -102,6 +102,21 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(self.db_access.get_local_data_store()?.time)
     }
 
+    // The unique name of the data set. Must equal the unique name of any sync partner.
+    pub fn data_set_name(&self) -> Result<String> {
+        Ok(self.db_access.get_data_set()?.unique_name)
+    }
+
+    // The unique name of this local data store. Must be unique throughout all sync partners.
+    pub fn local_data_store_name(&self) -> Result<String> {
+        Ok(self.db_access.get_local_data_store()?.unique_name)
+    }
+
+    // The human readable description of this local data store.
+    pub fn local_data_store_desc(&self) -> Result<String> {
+        Ok(self.db_access.get_local_data_store()?.human_name)
+    }
+
     /// Re-indexes the data stored in this data_store.
     ///
     /// Traverses the data directory and performs the following actions for the metadata DB:
