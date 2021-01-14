@@ -1,6 +1,3 @@
-mod version_peer;
-pub use self::version_peer::VersionPeer;
-
 use std::cmp::{max, Ordering};
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
@@ -96,8 +93,8 @@ mod tests {
 
     #[test]
     fn handling_non_existing_entries() {
-        let peer_a = VersionPeer::new("A");
-        let peer_b = VersionPeer::new("B");
+        let peer_a = String::from("a");
+        let peer_b = String::from("B");
 
         // A -> 0, B -> 0
         let empty_vector = VersionVector::new();
@@ -130,8 +127,8 @@ mod tests {
 
     #[test]
     fn compatible_vector_comparison() {
-        let peer_a = VersionPeer::new("A");
-        let peer_b = VersionPeer::new("B");
+        let peer_a = String::from("A");
+        let peer_b = String::from("B");
 
         // A -> 1, B -> 3
         let first_vector = VersionVector::from_initial_values(vec![(&peer_a, 1), (&peer_b, 3)]);
@@ -151,8 +148,8 @@ mod tests {
 
     #[test]
     fn incompatible_vector_comparison() {
-        let peer_a = VersionPeer::new("A");
-        let peer_b = VersionPeer::new("B");
+        let peer_a = String::from("A");
+        let peer_b = String::from("B");
 
         // A -> 1, B -> 2
         let mut first_vector = VersionVector::new();
@@ -174,9 +171,9 @@ mod tests {
 
     #[test]
     fn more_vector_time_comparisons() {
-        let peer_a = VersionPeer::new("A");
-        let peer_b = VersionPeer::new("B");
-        let peer_c = VersionPeer::new("C");
+        let peer_a = String::from("A");
+        let peer_b = String::from("B");
+        let peer_c = String::from("C");
 
         // A -> 1, B -> 1, C -> 0
         let v1 = VersionVector::from_initial_values(vec![(&peer_a, 1), (&peer_b, 1)]);
