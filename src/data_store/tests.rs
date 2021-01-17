@@ -110,35 +110,46 @@ fn scan_data_store_directory() {
     // Re-add some
     in_memory_fs.create_file("file-1").unwrap();
     in_memory_fs.create_dir("sUb-1", false).unwrap();
+    in_memory_fs.create_file("sUb-1/file-1").unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 5,
+            indexed_items: 6,
             changed_items: 0,
-            new_items: 2,
+            new_items: 3,
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 14);
+    assert_eq!(data_store_1.local_time().unwrap(), 15);
 
     // Changes in capitalization should be recognized as metadata changes
-    in_memory_fs.remove_file("file-1").unwrap();
-    in_memory_fs.remove_dir("sUb-1").unwrap();
+    in_memory_fs.rename("file-1", "FILE-1").unwrap();
+    in_memory_fs.rename("sUb-1", "SUB-1").unwrap();
+    in_memory_fs.rename("SUB-1/file-1", "SUB-1/FILE-1").unwrap();
 
-    in_memory_fs.create_file("FILE-1").unwrap();
-    in_memory_fs.create_dir("SUB-1", false).unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 5,
-            changed_items: 2,
+            indexed_items: 6,
+            changed_items: 3,
             new_items: 0,
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 16);
+    assert_eq!(data_store_1.local_time().unwrap(), 18);
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 6,
+            changed_items: 0,
+            new_items: 0,
+            deleted_items: 0
+        }
+    );
+    assert_eq!(data_store_1.local_time().unwrap(), 18);
 }
 
 fn dir_should_contain<FS: virtual_fs::FS>(fs: &FS, path: &str, expected_content: Vec<&str>) {

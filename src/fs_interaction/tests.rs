@@ -142,15 +142,9 @@ fn detects_duplicates() {
 #[test]
 fn calculates_hash_correctly() {
     const STRING_A: &str = "hello world!";
-    const HASH_A: [u8; 32] = [
-        117, 9, 229, 189, 160, 199, 98, 210, 186, 199, 249, 13, 117, 139, 91, 34, 99, 250, 1,
-        204, 188, 84, 42, 181, 227, 223, 22, 59, 224, 142, 108, 169,
-    ];
+    const HASH_A: &str = "7509E5BDA0C762D2BAC7F90D758B5B2263FA01CCBC542AB5E3DF163BE08E6CA9";
     const STRING_B: &str = "whoo!";
-    const HASH_B: [u8; 32] = [
-        151, 254, 64, 101, 229, 147, 199, 192, 195, 195, 188, 8, 124, 186, 196, 35, 235, 157,
-        84, 215, 226, 136, 93, 24, 67, 133, 176, 243, 247, 96, 139, 176,
-    ];
+    const HASH_B: &str = "97FE4065E593C7C0C3C3BC087CBAC423EB9D54D7E2885D184385B0F3F7608BB0";
 
     let test_fs = InMemoryFS::default();
     test_fs.create_file("/a.txt").unwrap();
@@ -168,15 +162,13 @@ fn calculates_hash_correctly() {
     assert_eq!(
         data_store
             .calculate_hash(&RelativePath::from_path("/a.txt"))
-            .unwrap()
-            .as_ref(),
+            .unwrap(),
         HASH_A
     );
     assert_eq!(
         data_store
             .calculate_hash(&RelativePath::from_path("/b.txt"))
-            .unwrap()
-            .as_ref(),
+            .unwrap(),
         HASH_B
     );
 }

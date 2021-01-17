@@ -553,11 +553,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let dir_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
 
         let db_item = self.db_access.get_local_data_item(&path)?;
-        match db_item {
-            metadata_db::DBItem {
-                content: metadata_db::ItemType::FILE { .. },
-                ..
-            } => {
+        match db_item.content {
+            metadata_db::ItemType::FILE { .. } => {
                 // Delete existing file
                 result.deleted_items += 1;
                 self.db_access.delete_local_data_item(&path)?;
@@ -571,10 +568,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     "",
                 )?;
             }
-            metadata_db::DBItem {
-                content: metadata_db::ItemType::FOLDER { metadata, .. },
-                ..
-            } => {
+            metadata_db::ItemType::FOLDER { metadata, .. } => {
                 // Simply update the relevant metadata if it is out of sync.
                 if metadata.mod_time != dir_mod_time || metadata.case_sensitive_name != path.name()
                 {
@@ -588,10 +582,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     )?;
                 }
             }
-            metadata_db::DBItem {
-                content: metadata_db::ItemType::DELETION { .. },
-                ..
-            } => {
+            metadata_db::ItemType::DELETION { .. } => {
                 // Create new dir entry
                 result.new_items += 1;
                 self.db_access.update_local_data_item(
@@ -620,19 +611,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let file_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
 
         let db_item = self.db_access.get_local_data_item(path)?;
-        match db_item {
-            metadata_db::DBItem {
-                content: metadata_db::ItemType::FILE { metadata, .. },
-                ..
-            } => {
+        match db_item.content {
+            metadata_db::ItemType::FILE { metadata, .. } => {
                 // We got an existing entry, see if it requires updating.
                 if metadata.mod_time != file_mod_time || metadata.case_sensitive_name != path.name()
                 {
-                    use data_encoding::HEXUPPER;
-                    let hash = self.fs_access.calculate_hash(&path)?;
-                    let hash = HEXUPPER.encode(hash.as_ref());
-
                     result.changed_items += 1;
+
+                    let hash = self.fs_access.calculate_hash(&path)?;
                     self.db_access.update_local_data_item(
                         &path,
                         file_creation_time,
@@ -641,9 +627,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         &hash,
                     )?;
                 } else if detect_bitrot {
-                    use data_encoding::HEXUPPER;
                     let hash = self.fs_access.calculate_hash(&path)?;
-                    let hash = HEXUPPER.encode(hash.as_ref());
 
                     if metadata.hash != hash {
                         // TODO: properly handle this by returning errors. Maybe re-trying to hash
@@ -652,24 +636,15 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     }
                 }
             }
-            metadata_db::DBItem {
-                content: metadata_db::ItemType::FOLDER { .. },
-                ..
-            } => {
+            metadata_db::ItemType::FOLDER { .. } => {
                 // FIXME: Handle if a folder is changed to be a file.
                 panic!("Changing folders to files is not supported!");
             }
-            metadata_db::DBItem {
-                content: metadata_db::ItemType::DELETION { .. },
-                ..
-            } => {
+            metadata_db::ItemType::DELETION { .. } => {
                 // We have no local entry for the target file in our DB, register it as a new file.
                 result.new_items += 1;
 
-                use data_encoding::HEXUPPER;
                 let hash = self.fs_access.calculate_hash(&path)?;
-                let hash = HEXUPPER.encode(hash.as_ref());
-
                 self.db_access.update_local_data_item(
                     &path,
                     file_creation_time,

@@ -7,7 +7,7 @@ mod errors;
 pub use self::errors::*;
 
 use filetime::FileTime;
-use ring::digest::{Context, Digest, SHA256};
+use ring::digest::{Context, SHA256};
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -148,7 +148,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         Ok(entries)
     }
 
-    pub fn calculate_hash(&self, relative_path: &RelativePath) -> Result<Digest> {
+    pub fn calculate_hash(&self, relative_path: &RelativePath) -> Result<String> {
         let absolute_path = self.root_path.join(relative_path.to_path_buf());
         let reader = self.fs.read_file(&absolute_path)?;
         let mut buffered_reader = io::BufReader::new(reader);
@@ -164,7 +164,11 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             context.update(&buffer[..count]);
         }
 
-        Ok(context.finish())
+        use data_encoding::HEXUPPER;
+        let digest = context.finish();
+        let hash = HEXUPPER.encode(digest.as_ref());
+
+        Ok(hash)
     }
 
     pub fn root_path(&self) -> PathBuf {
