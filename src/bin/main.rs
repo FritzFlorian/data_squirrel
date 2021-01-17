@@ -68,7 +68,7 @@ fn create_data_store(local_path: &str, cmd_cli: &ArgMatches) {
             data_store.local_data_store_desc().unwrap()
         ),
         Err(core::data_store::DataStoreError::FSInteractionError {
-            source: core::fs_interaction::FSInteractionError::AlreadyExists,
+            source: core::fs_interaction::FSInteractionError::MetadataDirAlreadyExists,
         }) => eprintln!("A data store already exists on the given path!"),
         Err(err) => eprintln!("{:?}", err),
     }

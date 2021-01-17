@@ -65,6 +65,13 @@ impl Metadata {
     pub fn file_type(&self) -> FileType {
         self.file_type
     }
+    pub fn is_file(&self) -> bool {
+        self.file_type == FileType::File
+    }
+    pub fn is_dir(&self) -> bool {
+        self.file_type == FileType::Dir
+    }
+
     pub fn read_only(&self) -> bool {
         self.read_only
     }

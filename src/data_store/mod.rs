@@ -186,6 +186,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(int_sync_response.externalize(&mapper))
     }
     pub fn sync_item_internal(&self, sync_request: IntSyncRequest) -> Result<IntSyncResponse> {
+        if !self.does_disk_item_match_db_item(&sync_request.item_path)? {
+            panic!("Must not sync if disk content is not correctly indexed in DB.");
+        }
+
         let local_item = self
             .db_access
             .get_local_data_item(&sync_request.item_path)?;
@@ -306,6 +310,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 self.db_access.sync_local_data_item(&path, &target_item)?;
             }
             IntSyncAction::UpdateRequired(sync_content) => {
+                if !self.does_disk_item_match_db_item(&path)? {
+                    panic!("Must not sync if disk content is not correctly indexed in DB.");
+                }
+
                 match sync_content {
                     IntSyncContent::Deletion => {
                         if local_item.is_deletion() {
@@ -539,6 +547,55 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
     fn fs_to_date_time(fs_time: &filetime::FileTime) -> NaiveDateTime {
         NaiveDateTime::from_timestamp(fs_time.unix_seconds(), fs_time.nanoseconds())
+    }
+
+    fn does_disk_item_match_db_item(&self, path: &RelativePath) -> Result<bool> {
+        if path.path_component_number() <= 1 {
+            // Skip root path
+            return Ok(true);
+        }
+        let db_entry = self.db_access.get_local_data_item(&path)?;
+
+        let folder_content = self.fs_access.index(&path.parent());
+        if folder_content.is_err() && folder_content.as_ref().err().unwrap().is_io_not_found() {
+            return Ok(db_entry.is_deletion());
+        }
+
+        let folder_content = folder_content.unwrap();
+        if db_entry.is_deletion() {
+            let has_item_on_disk = folder_content
+                .into_iter()
+                .any(|item| item.relative_path.name().to_lowercase() == path.name().to_lowercase());
+            return Ok(!has_item_on_disk);
+        }
+
+        let matching_disk_entry = folder_content.into_iter().find(|item| {
+            item.issues.is_empty()
+                && item.relative_path.name() == db_entry.metadata().case_sensitive_name
+        });
+        if matching_disk_entry.is_none() {
+            return Ok(false);
+        }
+        let disk_entry = matching_disk_entry.unwrap();
+
+        let disk_metadata = disk_entry.metadata.unwrap();
+        if Self::fs_to_date_time(&disk_metadata.last_mod_time()) != db_entry.metadata().mod_time {
+            return Ok(false);
+        }
+        if disk_metadata.is_file() != db_entry.is_file()
+            || disk_metadata.is_dir() != db_entry.is_folder()
+        {
+            return Ok(false);
+        }
+
+        if disk_metadata.is_file() {
+            let hash = self.fs_access.calculate_hash(path);
+            if hash.is_err() || hash.unwrap() != db_entry.metadata().hash {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     fn index_dir(

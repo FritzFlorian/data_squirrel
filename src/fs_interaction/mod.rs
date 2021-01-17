@@ -77,10 +77,13 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         let metadata_path = data_store_root.join(METADATA_DIR);
         match virtual_fs.create_dir(&metadata_path, false) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(FSInteractionError::AlreadyExists);
+                return Err(FSInteractionError::MetadataDirAlreadyExists);
             }
             Err(e) => {
-                return Err(FSInteractionError::IOError { source: e });
+                return Err(FSInteractionError::IOError {
+                    kind: e.kind().clone(),
+                    source: e,
+                });
             }
             _ => (),
         };
@@ -304,10 +307,13 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
 
         match self.fs.create_file(&self.lock_path()) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(FSInteractionError::AlreadyOpened);
+                return Err(FSInteractionError::MetadataDirAlreadyOpened);
             }
             Err(e) => {
-                return Err(FSInteractionError::IOError { source: e });
+                return Err(FSInteractionError::IOError {
+                    kind: e.kind().clone(),
+                    source: e,
+                });
             }
             Ok(file) => file,
         };

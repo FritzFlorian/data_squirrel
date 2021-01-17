@@ -4,17 +4,48 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum FSInteractionError {
-    AlreadyExists,
-    AlreadyOpened,
+    MetadataDirAlreadyExists,
+    MetadataDirAlreadyOpened,
     SoftLinksForbidden,
     // IOError is simply our 'catch all' error type for 'non-special' issues
-    IOError { source: io::Error },
+    IOError {
+        source: io::Error,
+        kind: std::io::ErrorKind,
+    },
 }
 pub type Result<T> = std::result::Result<T, FSInteractionError>;
 
+impl FSInteractionError {
+    pub fn is_io_not_found(&self) -> bool {
+        if let Self::IOError {
+            kind: std::io::ErrorKind::NotFound,
+            ..
+        } = self
+        {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_io_already_exists(&self) -> bool {
+        if let Self::IOError {
+            kind: std::io::ErrorKind::AlreadyExists,
+            ..
+        } = self
+        {
+            true
+        } else {
+            false
+        }
+    }
+}
 impl From<io::Error> for FSInteractionError {
     fn from(error: io::Error) -> Self {
-        Self::IOError { source: error }
+        Self::IOError {
+            kind: error.kind(),
+            source: error,
+        }
     }
 }
 impl fmt::Display for FSInteractionError {
@@ -25,10 +56,10 @@ impl fmt::Display for FSInteractionError {
 impl Error for FSInteractionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::IOError { ref source } => Some(source),
-            Self::AlreadyExists => None,
+            Self::IOError { ref source, .. } => Some(source),
+            Self::MetadataDirAlreadyExists => None,
             Self::SoftLinksForbidden => None,
-            Self::AlreadyOpened => None,
+            Self::MetadataDirAlreadyOpened => None,
         }
     }
 }

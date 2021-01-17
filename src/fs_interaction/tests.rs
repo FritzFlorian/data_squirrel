@@ -65,7 +65,7 @@ fn can_not_open_data_store_multiple_times() {
 
     // Opening second instance should fail
     match DefaultFSInteraction::open(test_dir.path()) {
-        Err(FSInteractionError::AlreadyOpened) => (),
+        Err(FSInteractionError::MetadataDirAlreadyOpened) => (),
         _ => panic!("Must report error that data_store is in use."),
     };
 }

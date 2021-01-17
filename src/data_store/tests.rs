@@ -1,5 +1,5 @@
 use super::*;
-use fs_interaction::virtual_fs::FS;
+use fs_interaction::virtual_fs::{InMemoryFS, FS};
 use std::fs::File;
 use std::io::Write;
 use std::thread::sleep;
@@ -174,14 +174,18 @@ fn dir_should_not_contain<FS: virtual_fs::FS>(
     }
 }
 
+fn create_in_memory_store() -> (InMemoryFS, DataStore<InMemoryFS>) {
+    let fs = virtual_fs::InMemoryFS::new();
+    let data_store =
+        DataStore::create_with_fs("", "XYZ", "XYZ", "source-data-store", fs.clone()).unwrap();
+
+    (fs, data_store)
+}
+
 #[test]
 fn unidirectional_sync() {
-    let fs_1 = virtual_fs::InMemoryFS::new();
-    let data_store_1 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "source-data-store", fs_1.clone()).unwrap();
-    let fs_2 = virtual_fs::InMemoryFS::new();
-    let data_store_2 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "dest-data-store", fs_2.clone()).unwrap();
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
 
     // Initial Data Set - Local Data Store
     fs_1.create_dir("sub-1", false).unwrap();
@@ -235,6 +239,91 @@ fn unidirectional_sync() {
 }
 
 #[test]
+#[should_panic(expected = "Must not sync if disk content is not correctly indexed in DB")]
+fn panics_when_trying_to_sync_without_index_1() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    // Initial Data Set - Local Data Store
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("file-1").unwrap();
+    fs_2.create_file("file-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    // Rename item on receiving data store after scan operation
+    fs_2.rename("file-1", "FILE-1").unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "Must not sync if disk content is not correctly indexed in DB")]
+fn panics_when_trying_to_sync_without_index_2() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    // Initial Data Set - Local Data Store
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("file-1").unwrap();
+    fs_2.create_file("file-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    // Delete item on receiving data store after scan operation
+    fs_2.remove_file("file-1").unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "Must not sync if disk content is not correctly indexed in DB")]
+fn panics_when_trying_to_sync_without_index_3() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    // Initial Data Set - Local Data Store
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("file-1").unwrap();
+    fs_2.create_file("file-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    // Delete item on sending data store after scan operation
+    fs_1.remove_file("file-1").unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "Must not sync if disk content is not correctly indexed in DB")]
+fn panics_when_trying_to_sync_without_index_4() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    // Initial Data Set - Local Data Store
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("file-1").unwrap();
+    fs_2.create_file("file-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    // Modify item on sending data store after scan operation
+    fs_1.test_set_file_content("file-1", b"test".to_vec())
+        .unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+}
+
+#[test]
 fn metadata_set_correctly_after_sync() {
     // We experienced a bug where after sycing a file from A -> B the transmitted file is
     // detected to have a change when then scanning the disk content on B.
@@ -277,15 +366,9 @@ fn metadata_set_correctly_after_sync() {
 
 #[test]
 fn multi_target() {
-    let fs_1 = virtual_fs::InMemoryFS::new();
-    let data_store_1 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-1", fs_1.clone()).unwrap();
-    let fs_2 = virtual_fs::InMemoryFS::new();
-    let data_store_2 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-2", fs_2.clone()).unwrap();
-    let fs_3 = virtual_fs::InMemoryFS::new();
-    let data_store_3 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-3", fs_3.clone()).unwrap();
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+    let (fs_3, data_store_3) = create_in_memory_store();
 
     // Initial Data Set
     fs_1.create_dir("sub-1", false).unwrap();
@@ -358,12 +441,9 @@ fn multi_target() {
 
 #[test]
 fn convert_from_and_to_external_version_vectors() {
-    let fs_1 = virtual_fs::InMemoryFS::new();
-    let data_store_1 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-1", fs_1.clone()).unwrap();
-    let fs_2 = virtual_fs::InMemoryFS::new();
-    let data_store_2 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "data-store-2", fs_2.clone()).unwrap();
+    let (_fs_1, data_store_1) = create_in_memory_store();
+    let (_fs_2, data_store_2) = create_in_memory_store();
+
     let data_store_1_name = data_store_1
         .db_access
         .get_local_data_store()
