@@ -18,6 +18,8 @@ const LOCK_FILE: &str = "lock";
 const PENDING_FILES_DIR: &str = "pending_files";
 const SNAPSHOT_DIR: &str = "snapshots";
 
+const DS_STORE: &str = ".DS_Store";
+
 #[derive(Debug)]
 pub struct FSInteraction<FS: virtual_fs::FS> {
     fs: FS,
@@ -279,7 +281,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
     fn is_reserved_name(&self, file_name: &str) -> bool {
         // Currently we only skip the metadata dir, however,
         // we might want to add special marker files later on.
-        file_name.eq(METADATA_DIR)
+        file_name.eq(METADATA_DIR) || file_name.eq(DS_STORE)
     }
 
     // Ensures all metadata directories exist.

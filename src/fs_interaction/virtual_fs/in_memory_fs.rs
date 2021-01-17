@@ -289,6 +289,7 @@ impl FS for InMemoryFS {
         if let Some(item) = self.items.borrow_mut().get_mut(&path) {
             item.data.clear();
             let bytes_written = data.read_to_end(&mut item.data)?;
+            item.set_mod_time_now();
             Ok(bytes_written)
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
@@ -321,5 +322,10 @@ impl InMemoryItem {
             path: item_path,
             data: Vec::new(),
         }
+    }
+
+    fn set_mod_time_now(&mut self) {
+        let time_now = FileTime::now();
+        self.metadata.last_mod_time = time_now;
     }
 }

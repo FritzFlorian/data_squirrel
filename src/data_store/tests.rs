@@ -1,5 +1,9 @@
 use super::*;
 use fs_interaction::virtual_fs::FS;
+use std::fs::File;
+use std::io::Write;
+use std::thread::sleep;
+use std::time::Duration;
 
 #[test]
 fn create_data_store() {
@@ -217,6 +221,47 @@ fn unidirectional_sync() {
     // The contents should now match without any conflicts
     dir_should_contain(&fs_1, "", vec!["sub-1", "sub-2", "file-2", "file-3"]);
     dir_should_contain(&fs_2, "", vec!["sub-1", "sub-2", "file-2", "file-3"]);
+}
+
+#[test]
+fn metadata_set_correctly_after_sync() {
+    // We experienced a bug where after sycing a file from A -> B the transmitted file is
+    // detected to have a change when then scanning the disk content on B.
+    // For example, say you create test.txt on A, sync it to B, then the next scan on B will
+    // detect a change in test.txt, even though it was not changed locally.
+
+    let test_dir_1 = tempfile::tempdir().unwrap();
+    let test_dir_2 = tempfile::tempdir().unwrap();
+
+    let data_store_1 =
+        DefaultDataStore::create(test_dir_1.path(), "XYZ", "XYZ", "source-data-store").unwrap();
+    let data_store_2 =
+        DefaultDataStore::create(test_dir_2.path(), "XYZ", "XYZ", "source-data-store").unwrap();
+
+    // Create file in store 1 and sync it to store 2
+    File::create(test_dir_1.path().join("test.txt"))
+        .unwrap()
+        .write_all("hello!".as_bytes())
+        .unwrap();
+    data_store_1.perform_full_scan().unwrap();
+
+    // ..give some time for the time stamps of the newly created file to be different.
+    sleep(Duration::from_millis(10));
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // A scan on store 2 should now NOT result in any changes
+    let changes = data_store_2.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 1,
+            changed_items: 0,
+            new_items: 0,
+            deleted_items: 0
+        }
+    );
 }
 
 #[test]

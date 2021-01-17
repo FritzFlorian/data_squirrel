@@ -372,13 +372,13 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         self.fs_access.set_metadata(
                             &tmp_file_path,
                             FileTime::from_unix_time(
-                                remote_fs_metadata.creation_time.timestamp(),
-                                remote_fs_metadata.creation_time.timestamp_subsec_nanos(),
+                                remote_fs_metadata.mod_time.timestamp(),
+                                remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
                             ),
                             false,
                         )?;
 
-                        // ...replace local.
+                        // ...remove local file/folder with same name.
                         match &local_item.content {
                             metadata_db::ItemType::FILE { .. } => {
                                 self.fs_access.delete_file(&path)?
@@ -388,6 +388,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                             }
                             metadata_db::ItemType::DELETION { .. } => (), // Nothing to do,
                         }
+                        // ... move the downloaded file over it.
                         self.fs_access
                             .rename_file_or_directory(&tmp_file_path, &path)?;
 
@@ -438,8 +439,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                             self.fs_access.set_metadata(
                                 &path,
                                 FileTime::from_unix_time(
-                                    remote_fs_metadata.creation_time.timestamp(),
-                                    remote_fs_metadata.creation_time.timestamp_subsec_nanos(),
+                                    remote_fs_metadata.mod_time.timestamp(),
+                                    remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
                                 ),
                                 false,
                             )?;
