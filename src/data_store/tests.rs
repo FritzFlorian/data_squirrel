@@ -241,7 +241,7 @@ fn metadata_set_correctly_after_sync() {
     // Create file in store 1 and sync it to store 2
     File::create(test_dir_1.path().join("test.txt"))
         .unwrap()
-        .write_all("hello!".as_bytes())
+        .write_all(b"hello!")
         .unwrap();
     data_store_1.perform_full_scan().unwrap();
 

@@ -738,7 +738,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // no longer present on disk, thus signaling a deletion.
         let child_items = self.db_access.get_local_child_data_items(&dir_path)?;
         for child_item in child_items.iter() {
-            if !lower_case_entries.contains(&child_item.path_component) {
+            if !lower_case_entries.contains(&child_item.path_component.to_lowercase()) {
                 let child_item_path = dir_path.join(child_item.path_component.clone());
                 scan_result.deleted_items +=
                     self.db_access.delete_local_data_item(&child_item_path)?;

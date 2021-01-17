@@ -108,7 +108,7 @@ fn correctly_enter_data_items() {
     insert_data_item(&metadata_store, "sub/folder", false);
     assert_mod_time(&metadata_store, "sub/folder", data_store.id, 2);
 
-    insert_data_item(&metadata_store, "sub/folder/file", false);
+    insert_data_item(&metadata_store, "sub/folder/file", true);
     assert_mod_time(&metadata_store, "sub/folder/file", data_store.id, 3);
 
     // Parent folders get updated correctly
@@ -130,7 +130,7 @@ fn correctly_enter_data_items() {
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_folder());
-    assert_eq!(children[0].path_component, "sub");
+    assert_eq!(children[0].path_component, "sUb");
 
     // Delete items (partially, we did not 'clean up' deletion notices jet).
     delete_data_item(&metadata_store, "sub/folder/file");
@@ -148,6 +148,49 @@ fn correctly_enter_data_items() {
     assert_mod_time(&metadata_store, "sub", data_store.id, 8);
 
     // TODO: Clean up deletion notices and re-query child items!
+}
+
+#[test]
+fn correctly_persevere_case_sensitivity() {
+    // We expect the metadata DB to KEEP case sensitivity in file names when returning
+    // an entry, but at the same time we expect it to be invariant to case sensitivity when
+    // searching for an in the db.
+    let metadata_store = open_metadata_store();
+    let (_data_set, _data_store) = insert_sample_data_set(&metadata_store);
+
+    // Insert some sample data with different cases (keep all paths intact)
+    insert_data_item(&metadata_store, "sUB", false);
+    insert_data_item(&metadata_store, "sUB/fOLDER", false);
+    insert_data_item(&metadata_store, "sUB/fOLDER/fILE", true);
+
+    // Query should work with any case sensitivity.
+    let file = metadata_store
+        .get_local_data_item(&RelativePath::from_path("sUB/fOLDER/fILE"))
+        .unwrap();
+    assert_eq!(file.path_component, "fILE");
+    assert_eq!(file.metadata().case_sensitive_name, "fILE");
+    let file = metadata_store
+        .get_local_data_item(&RelativePath::from_path("Sub/Folder/File"))
+        .unwrap();
+    assert_eq!(file.path_component, "fILE");
+    assert_eq!(file.metadata().case_sensitive_name, "fILE");
+
+    // Inserts should work with any case sensitivity
+    insert_data_item(&metadata_store, "sub/FOLDER/tEST", false);
+
+    // Query of multiple children should work as expected.
+
+    // Check if child queries work
+    let children = metadata_store
+        .get_local_child_data_items(&RelativePath::from_path("SUB/FOLDER"))
+        .unwrap();
+    assert_eq!(children.len(), 2);
+    assert!(children.iter().any(|child| {
+        child.path_component == "fILE" && child.metadata().case_sensitive_name == "fILE"
+    }));
+    assert!(children.iter().any(|child| {
+        child.path_component == "tEST" && child.metadata().case_sensitive_name == "tEST"
+    }));
 }
 
 #[test]
