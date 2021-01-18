@@ -33,6 +33,10 @@ impl RelativePath {
         RelativePath { path_components }
     }
 
+    pub fn from_vec(path_components: Vec<String>) -> RelativePath {
+        RelativePath { path_components }
+    }
+
     pub fn to_path_buf(&self) -> PathBuf {
         let mut result = PathBuf::new();
 

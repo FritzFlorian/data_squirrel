@@ -365,6 +365,65 @@ fn metadata_set_correctly_after_sync() {
 }
 
 #[test]
+fn sync_changes_in_file_name_case() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    // Initial Data Set - Local Data Store
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("file-1").unwrap();
+    fs_1.create_file("sub-1/file-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // Change the case of files in the local data store
+    fs_1.rename("sub-1", "SUB-1").unwrap();
+    fs_1.rename("file-1", "File-1").unwrap();
+    fs_1.rename("SUB-1/file-1", "SUB-1/FILE-1").unwrap();
+    // ...also mix in some file contents.
+    fs_1.test_set_file_content("File-1", b"hello there!".to_vec())
+        .unwrap();
+    fs_1.test_increase_file_mod_time("File-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // We expect the case changes to be propagated
+    dir_should_contain(&fs_2, "", vec!["SUB-1", "File-1"]);
+    dir_should_not_contain(&fs_2, "", vec!["sub-1", "file-1"]);
+    dir_should_contain(&fs_2, "SUB-1", vec!["FILE-1"]);
+    dir_should_not_contain(&fs_2, "SUB-1", vec!["file-1"]);
+
+    // Try some more changes, especially with parent dir/child interactions, maybe even change
+    // the from folder to file at the same time.
+    fs_1.remove_file("File-1").unwrap();
+    fs_1.create_dir("FILE-1", false).unwrap();
+    fs_1.create_file("SUB-1/file-2").unwrap();
+    fs_1.rename("SUB-1", "sub-1").unwrap();
+
+    // Index it and sync it to the remote data store
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // We expect the case changes to be propagated
+    dir_should_contain(&fs_2, "", vec!["sub-1", "FILE-1"]);
+    dir_should_not_contain(&fs_2, "", vec!["File-1", "SUB-1"]);
+    dir_should_contain(&fs_2, "sub-1", vec!["FILE-1", "file-2"]);
+}
+
+#[test]
 fn multi_target() {
     let (fs_1, data_store_1) = create_in_memory_store();
     let (fs_2, data_store_2) = create_in_memory_store();

@@ -130,7 +130,7 @@ fn correctly_enter_data_items() {
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_folder());
-    assert_eq!(children[0].path_component, "sUb");
+    assert_eq!(children[0].path.name(), "sUb");
 
     // Delete items (partially, we did not 'clean up' deletion notices jet).
     delete_data_item(&metadata_store, "sub/folder/file");
@@ -141,7 +141,7 @@ fn correctly_enter_data_items() {
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_deletion());
-    assert_eq!(children[0].path_component, "sub");
+    assert_eq!(children[0].path.name(), "sub");
 
     // Create new files 'over' an previous deletion notice.
     insert_data_item(&metadata_store, "SUB", false);
@@ -167,12 +167,12 @@ fn correctly_persevere_case_sensitivity() {
     let file = metadata_store
         .get_local_data_item(&RelativePath::from_path("sUB/fOLDER/fILE"))
         .unwrap();
-    assert_eq!(file.path_component, "fILE");
+    assert_eq!(file.path.name(), "fILE");
     assert_eq!(file.metadata().case_sensitive_name, "fILE");
     let file = metadata_store
         .get_local_data_item(&RelativePath::from_path("Sub/Folder/File"))
         .unwrap();
-    assert_eq!(file.path_component, "fILE");
+    assert_eq!(file.path.name(), "fILE");
     assert_eq!(file.metadata().case_sensitive_name, "fILE");
 
     // Inserts should work with any case sensitivity
@@ -186,10 +186,10 @@ fn correctly_persevere_case_sensitivity() {
         .unwrap();
     assert_eq!(children.len(), 2);
     assert!(children.iter().any(|child| {
-        child.path_component == "fILE" && child.metadata().case_sensitive_name == "fILE"
+        child.path.name() == "fILE" && child.metadata().case_sensitive_name == "fILE"
     }));
     assert!(children.iter().any(|child| {
-        child.path_component == "tEST" && child.metadata().case_sensitive_name == "tEST"
+        child.path.name() == "tEST" && child.metadata().case_sensitive_name == "tEST"
     }));
 }
 

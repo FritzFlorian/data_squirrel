@@ -17,26 +17,32 @@ pub type Result<T> = std::result::Result<T, FSInteractionError>;
 
 impl FSInteractionError {
     pub fn is_io_not_found(&self) -> bool {
-        if let Self::IOError {
-            kind: std::io::ErrorKind::NotFound,
-            ..
-        } = self
-        {
-            true
-        } else {
-            false
+        match self {
+            Self::IOError {
+                kind: std::io::ErrorKind::NotFound,
+                ..
+            } => true,
+            _ => false,
         }
     }
 
     pub fn is_io_already_exists(&self) -> bool {
-        if let Self::IOError {
-            kind: std::io::ErrorKind::AlreadyExists,
-            ..
-        } = self
-        {
-            true
-        } else {
-            false
+        match self {
+            Self::IOError {
+                kind: std::io::ErrorKind::AlreadyExists,
+                ..
+            } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_io_no_directory(&self) -> bool {
+        match self {
+            Self::IOError {
+                kind: std::io::ErrorKind::Other,
+                source: io_error,
+            } if io_error.raw_os_error() == Some(20) => true,
+            _ => false,
         }
     }
 }

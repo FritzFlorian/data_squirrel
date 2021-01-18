@@ -3,6 +3,7 @@ use super::Item;
 use super::ModMetadata;
 use super::PathComponent;
 
+use fs_interaction::relative_path::RelativePath;
 use version_vector::VersionVector;
 
 /// DB-Internal representation of an entry loaded from the DB.
@@ -42,7 +43,7 @@ impl DBItemInternal {
 // We ONLY return this to external actors in a fully loaded state.
 #[derive(Clone)]
 pub struct DBItem {
-    pub path_component: String,
+    pub path: RelativePath,
     pub sync_time: VersionVector<i64>,
 
     pub content: ItemType,
@@ -73,7 +74,7 @@ pub struct ItemFSMetadata {
 }
 
 impl DBItem {
-    pub fn from_internal_item(item: DBItemInternal) -> Self {
+    pub fn from_internal_item(parent_items: &Vec<DBItemInternal>, item: DBItemInternal) -> Self {
         let (item_type, file_name) = if item.item.is_deleted {
             (
                 ItemType::DELETION,
@@ -114,8 +115,20 @@ impl DBItem {
             }
         };
 
+        let parent_path_components: Vec<_> = parent_items
+            .iter()
+            .map(|parent_item| {
+                if let Some(metadata) = &parent_item.fs_metadata {
+                    metadata.case_sensitive_name.clone()
+                } else {
+                    parent_item.path_component.path_component.clone()
+                }
+            })
+            .collect();
+        let parent_path = RelativePath::from_vec(parent_path_components);
+
         Self {
-            path_component: file_name,
+            path: parent_path.join_mut(file_name),
             sync_time: item.sync_time.unwrap(),
             content: item_type,
         }

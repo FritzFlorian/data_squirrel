@@ -171,11 +171,15 @@ impl FS for InMemoryFS {
     }
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>> {
         let path = self.canonicalize(path)?;
+        let items = self.items.borrow_mut();
 
-        if self.items.borrow_mut().deref().contains_key(&path) {
-            let items = self
-                .items
-                .borrow_mut()
+        let dir_item = items.deref().get(&path);
+        if let Some(dir_item) = dir_item {
+            if dir_item.metadata.is_file() {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+
+            let items = items
                 .deref()
                 .iter()
                 .filter(|(item_path, _)| {

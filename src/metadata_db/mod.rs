@@ -164,12 +164,12 @@ impl MetadataDB {
             if path_items.len() == path.get_path_components().len() {
                 // The item has an actual entry in the db, inspect it further.
                 let target_item = path_items.pop().unwrap();
-                Ok(DBItem::from_internal_item(target_item))
+                Ok(DBItem::from_internal_item(&path_items, target_item))
             } else {
                 // The item has no more entry in the db, thus we 'create' a deletion notice.
                 let last_db_entry = path_items.pop().unwrap();
                 Ok(DBItem {
-                    path_component: path.name().to_lowercase(),
+                    path: path.clone(),
                     sync_time: last_db_entry.sync_time.unwrap(),
 
                     content: ItemType::DELETION,
@@ -194,7 +194,9 @@ impl MetadataDB {
                 // Query its content/children.
                 self.load_child_items(&dir_item)?
                     .into_iter()
-                    .map(|internal_item| Ok(DBItem::from_internal_item(internal_item)))
+                    .map(|internal_item| {
+                        Ok(DBItem::from_internal_item(&dir_path_items, internal_item))
+                    })
                     .collect()
             } else {
                 // The parent path is not in the DB, thus we have no child items.
