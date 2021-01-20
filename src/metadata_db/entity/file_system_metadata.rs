@@ -1,6 +1,7 @@
 use super::schema::file_system_metadatas;
 
-#[derive(Debug, Queryable, Clone)]
+#[derive(Debug, Queryable, QueryableByName, Clone)]
+#[table_name = "file_system_metadatas"]
 pub struct FileSystemMetadata {
     pub id: i64,
 

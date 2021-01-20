@@ -1,6 +1,7 @@
 use super::schema::mod_metadatas;
 
-#[derive(Debug, Queryable, Clone)]
+#[derive(Debug, Queryable, QueryableByName, Clone)]
+#[table_name = "mod_metadatas"]
 pub struct ModMetadata {
     pub id: i64,
 

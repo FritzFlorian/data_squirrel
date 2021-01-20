@@ -1,6 +1,7 @@
 use super::schema::path_components;
 
-#[derive(Debug, Queryable, Clone)]
+#[derive(Debug, Queryable, QueryableByName, Clone)]
+#[table_name = "path_components"]
 pub struct PathComponent {
     pub id: i64,
 

@@ -16,6 +16,7 @@ mod scan_result;
 pub use self::scan_result::ScanResult;
 mod errors;
 pub use self::errors::*;
+use metadata_db::DBItem;
 
 pub struct DataStore<FS: virtual_fs::FS> {
     fs_access: FSInteraction<FS>,
@@ -186,13 +187,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(int_sync_response.externalize(&mapper))
     }
     pub fn sync_item_internal(&self, sync_request: IntSyncRequest) -> Result<IntSyncResponse> {
-        if !self.does_disk_item_match_db_item(&sync_request.item_path)? {
-            panic!("Must not sync if disk content is not correctly indexed in DB.");
-        }
-
         let local_item = self
             .db_access
             .get_local_data_item(&sync_request.item_path)?;
+        if !self.does_disk_item_match_db_item(&local_item, false)? {
+            panic!("Must not sync if disk content is not correctly indexed in DB.");
+        }
 
         if local_item.is_deletion() {
             Ok(IntSyncResponse {
@@ -227,7 +227,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 } => {
                     let child_item_names = self
                         .db_access
-                        .get_local_child_data_items(&sync_request.item_path)?
+                        .get_local_child_items(&sync_request.item_path)?
                         .into_iter()
                         .map(|item| item.path.name().to_owned())
                         .collect();
@@ -315,7 +315,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     .sync_local_data_item(&localized_path, &target_item)?;
             }
             IntSyncAction::UpdateRequired(sync_content) => {
-                if !self.does_disk_item_match_db_item(&localized_path)? {
+                if !self.does_disk_item_match_db_item(&local_item, true)? {
                     panic!("Must not sync if disk content is not correctly indexed in DB.");
                 }
 
@@ -498,9 +498,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         }
                         // ...and also into local items (these should simply get deleted,
                         // but we can optimize this later on after the basic works).
-                        for local_child in
-                            self.db_access.get_local_child_data_items(&localized_path)?
-                        {
+                        for local_child in self.db_access.get_local_child_items(&localized_path)? {
                             if !visited_items.contains(&local_child.path.name().to_lowercase()) {
                                 self.sync_from_other_store_recursive(
                                     &from_other,
@@ -513,8 +511,21 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
                         // AFTER all sub-items are in sync, add the sync time of the remote
                         // folder into this folder.
+                        // Also make sure the local folder metadata is correct.
+                        if local_item.is_folder() && local_item.path.name() != remote_path.name() {
+                            self.fs_access
+                                .rename_file_or_directory(&local_item.path, &remote_path)?;
+                        }
+                        self.fs_access.set_metadata(
+                            &remote_path,
+                            FileTime::from_unix_time(
+                                remote_fs_metadata.mod_time.timestamp(),
+                                remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
+                            ),
+                            false,
+                        )?;
                         let folder_after_sync = metadata_db::DBItem {
-                            path: remote_path.clone(),
+                            path: remote_path,
                             sync_time: sync_response.sync_time,
                             content: metadata_db::ItemType::FOLDER {
                                 metadata: remote_fs_metadata,
@@ -523,12 +534,6 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 mod_time: VersionVector::new(),
                             },
                         };
-                        // ...and make sure the local folder metadata (i.e. its name) is correct
-                        // by renaming our local folder if required.
-                        if local_item.is_folder() && local_item.path.name() != remote_path.name() {
-                            self.fs_access
-                                .rename_file_or_directory(&local_item.path, &remote_path)?;
-                        }
                         self.db_access
                             .sync_local_data_item(&localized_path, &folder_after_sync)?;
                     }
@@ -575,57 +580,76 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         NaiveDateTime::from_timestamp(fs_time.unix_seconds(), fs_time.nanoseconds())
     }
 
-    /// Checks if the item on the given path is up to date in the database.
+    /// Checks if the item on the given path on disk matches its entry in the database.
     /// If anything differs between the DB and disk content, false is returned.
-    fn does_disk_item_match_db_item(&self, path: &RelativePath) -> Result<bool> {
-        if path.path_component_number() <= 1 {
-            // Skip root path
+    ///
+    /// Optionally, the parent folder content can be re-checked to make sure no 'duplicate' file
+    /// that only differs in case sensitivity is present.
+    ///
+    /// Effectively, this returning false means that the file should be re-indexed before performing
+    /// any synchronization operations on it.
+    fn does_disk_item_match_db_item(&self, db_item: &DBItem, check_folder: bool) -> Result<bool> {
+        // Root directory is always fine.
+        if db_item.path.path_component_number() <= 1 {
             return Ok(true);
         }
-        let db_entry = self.db_access.get_local_data_item(&path)?;
-        let db_path = &db_entry.path;
 
-        let folder_content = self.fs_access.index(&db_path.parent());
-        if folder_content.is_err() {
-            if folder_content.as_ref().err().unwrap().is_io_not_found() {
-                return Ok(db_entry.is_deletion());
+        let disk_metadata = if check_folder {
+            // We need to re-index the folder to be sure there is no duplicate entry in the directory.
+            let folder_content = self.fs_access.index(&db_item.path.parent());
+            if folder_content.is_err() {
+                if folder_content.as_ref().err().unwrap().is_io_not_found() {
+                    return Ok(db_item.is_deletion());
+                }
+                if folder_content.as_ref().err().unwrap().is_io_no_directory() {
+                    return Ok(db_item.is_deletion());
+                }
+                println!("Encountered unexpected FS error.");
             }
-            if folder_content.as_ref().err().unwrap().is_io_no_directory() {
-                return Ok(db_entry.is_deletion());
+
+            // In case of a deletion in the DB there must be NO entry on disk.
+            let folder_content = folder_content?;
+            if db_item.is_deletion() {
+                let has_item_on_disk = folder_content.into_iter().any(|item| {
+                    item.relative_path.name().to_lowercase() == db_item.path.name().to_lowercase()
+                });
+                return Ok(!has_item_on_disk);
             }
-            println!("We really do not want to be here...");
-        }
 
-        let folder_content = folder_content?;
-        if db_entry.is_deletion() {
-            let has_item_on_disk = folder_content.into_iter().any(|item| {
-                item.relative_path.name().to_lowercase() == db_path.name().to_lowercase()
-            });
-            return Ok(!has_item_on_disk);
-        }
+            // Make sure the folder has the target item and it has no issues.
+            let matching_disk_entry = folder_content
+                .into_iter()
+                .find(|item| item.relative_path.name() == db_item.metadata().case_sensitive_name);
+            if matching_disk_entry.is_none() {
+                return Ok(false);
+            }
+            let disk_entry = matching_disk_entry.unwrap();
+            if !disk_entry.issues.is_empty() {
+                return Ok(false);
+            }
 
-        let matching_disk_entry = folder_content.into_iter().find(|item| {
-            item.issues.is_empty()
-                && item.relative_path.name() == db_entry.metadata().case_sensitive_name
-        });
-        if matching_disk_entry.is_none() {
-            return Ok(false);
-        }
-        let disk_entry = matching_disk_entry.unwrap();
+            disk_entry.metadata.unwrap()
+        } else {
+            let metadata = self.fs_access.metadata(&db_item.path);
+            if metadata.is_err() && metadata.as_ref().err().unwrap().is_io_not_found() {
+                return Ok(db_item.is_deletion());
+            }
 
-        let disk_metadata = disk_entry.metadata.unwrap();
-        if Self::fs_to_date_time(&disk_metadata.last_mod_time()) != db_entry.metadata().mod_time {
-            return Ok(false);
-        }
-        if disk_metadata.is_file() != db_entry.is_file()
-            || disk_metadata.is_dir() != db_entry.is_folder()
+            metadata?
+        };
+
+        // Check that all metadata matches.
+        if disk_metadata.is_file() != db_item.is_file()
+            || disk_metadata.is_dir() != db_item.is_folder()
         {
             return Ok(false);
         }
-
+        if Self::fs_to_date_time(&disk_metadata.last_mod_time()) != db_item.metadata().mod_time {
+            return Ok(false);
+        }
         if disk_metadata.is_file() {
-            let hash = self.fs_access.calculate_hash(&db_path);
-            if hash.is_err() || hash.unwrap() != db_entry.metadata().hash {
+            let hash = self.fs_access.calculate_hash(&db_item.path);
+            if hash.is_err() || hash.unwrap() != db_item.metadata().hash {
                 return Ok(false);
             }
         }
@@ -803,7 +827,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // Lastly we perform the 'negative' operation of the scan process:
         // We load all known entries of the directory and see if there are any that are
         // no longer present on disk, thus signaling a deletion.
-        let child_items = self.db_access.get_local_child_data_items(&dir_path)?;
+        let child_items = self.db_access.get_local_child_items(&dir_path)?;
         for child_item in child_items.iter() {
             if !lower_case_entries.contains(&child_item.path.name().to_lowercase()) {
                 let child_item_path = child_item.path.clone();

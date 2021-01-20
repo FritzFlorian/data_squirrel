@@ -1,6 +1,7 @@
 use super::schema::items;
 
-#[derive(Debug, Queryable, Clone)]
+#[derive(Debug, Queryable, QueryableByName, Clone)]
+#[table_name = "items"]
 pub struct Item {
     pub id: i64,
 

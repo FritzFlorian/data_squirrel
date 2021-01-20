@@ -126,7 +126,7 @@ fn correctly_enter_data_items() {
 
     // Check if child queries work
     let children = metadata_store
-        .get_local_child_data_items(&RelativePath::from_path(""))
+        .get_local_child_items(&RelativePath::from_path(""))
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_folder());
@@ -137,7 +137,7 @@ fn correctly_enter_data_items() {
     delete_data_item(&metadata_store, "sub/folder");
     delete_data_item(&metadata_store, "sub");
     let children = metadata_store
-        .get_local_child_data_items(&RelativePath::from_path(""))
+        .get_local_child_items(&RelativePath::from_path(""))
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_deletion());
@@ -148,6 +148,22 @@ fn correctly_enter_data_items() {
     assert_mod_time(&metadata_store, "sub", data_store.id, 8);
 
     // TODO: Clean up deletion notices and re-query child items!
+}
+
+#[test]
+fn handle_file_names_with_same_prefix() {
+    let metadata_store = open_metadata_store();
+    let (_data_set, _data_store) = insert_sample_data_set(&metadata_store);
+
+    // Regression test, before it would fail if two entries in the same directory where the
+    // prefix of the targeted item.
+    insert_data_item(&metadata_store, "sub", false);
+    insert_data_item(&metadata_store, "sub/file..", true);
+    insert_data_item(&metadata_store, "sub/file.", true);
+    // We would find all 3, 'sub', 'sub/file.' and 'sub/file..' with the
+    // bug in place, while we actually only want to search for items that directly match the target
+    // path of 'sub/file...' without any extra post-fixes.
+    insert_data_item(&metadata_store, "sub/file...", true);
 }
 
 #[test]
@@ -182,7 +198,7 @@ fn correctly_persevere_case_sensitivity() {
 
     // Check if child queries work
     let children = metadata_store
-        .get_local_child_data_items(&RelativePath::from_path("SUB/FOLDER"))
+        .get_local_child_items(&RelativePath::from_path("SUB/FOLDER"))
         .unwrap();
     assert_eq!(children.len(), 2);
     assert!(children.iter().any(|child| {

@@ -13,7 +13,7 @@ pub fn migrate(conn: &SqliteConnection) -> Result<()> {
 // This is the main search we might do in our DB and thus worth speeding up.
 fn create_index_path_components(conn: &SqliteConnection) -> Result<()> {
     sql_query(
-        "CREATE UNIQUE INDEX path_components_idx ON path_components(path_component, parent_component_id)",
+        "CREATE UNIQUE INDEX path_components_idx ON path_components(parent_component_id, path_component)",
     )
     .execute(conn)?;
     Ok(())

@@ -3,10 +3,12 @@ mod schema;
 use self::schema::*;
 pub mod entity;
 pub use self::entity::*;
+// Helpers for handling more complex query scenarios without cluttering logic.
+mod queries;
 // External representation of the DB.
 mod db_item;
 pub use self::db_item::*;
-
+// Error boilerplate
 mod errors;
 pub use self::errors::*;
 mod db_migration;
@@ -178,13 +180,11 @@ impl MetadataDB {
         })
     }
 
-    /// Queries all child items of a given path that are present in the DB.
-    pub fn get_local_child_data_items(&self, dir_path: &RelativePath) -> Result<Vec<DBItem>> {
-        // Any operation involving consistency of sync-time stamps and/or parent-child relations
-        // between items in the database requires a consistent view of the invariants held.
+    /// Queries all item names (NOT case sensitive) present in the given dir_path.
+    pub fn get_local_child_items(&self, dir_path: &RelativePath) -> Result<Vec<DBItem>> {
         self.conn.transaction::<_, MetadataDBError, _>(|| {
             let local_data_store = self.get_local_data_store()?;
-            let dir_path_items = self.load_data_items_on_path(&local_data_store, &dir_path)?;
+            let dir_path_items = self.load_data_items_on_path(&local_data_store, dir_path)?;
 
             if dir_path_items.len() == dir_path.get_path_components().len() {
                 // The parent directory exists, go and inspect it further.
@@ -508,32 +508,33 @@ impl MetadataDB {
         let mut current_sync_time = VersionVector::<i64>::new();
         current_sync_time[&for_data_store.id] = for_data_store.time;
 
-        // Note: Maybe re-work with 'WITH RECURSIVE' queries directly in sqlite.
-        //       Wait for actual performance issues before trying to do this.
+        // Note: We tried to use 'WITH RECURSIVE' queries directly, however, they are slower.
         let mut result = Vec::<DBItemInternal>::with_capacity(path.get_path_components().len());
-
         for path_component in path.get_path_components() {
             let parent_id = result.last().map(|item| item.path_component.id);
-            let component_db_item = if let Some(parent_path_component_id) = parent_id {
-                path_components::table
-                    .filter(path_components::path_component.eq(path_component))
-                    .filter(path_components::parent_component_id.eq(Some(parent_path_component_id)))
-                    .inner_join(items::table)
-                    .filter(items::data_store_id.eq(for_data_store.id))
-                    .first::<(PathComponent, Item)>(&self.conn)
-                    .optional()?
+            let db_item = if let Some(parent_id) = parent_id {
+                queries::ItemLoader {
+                    path_query: path_components::table
+                        .filter(path_components::parent_component_id.eq(parent_id))
+                        .filter(path_components::path_component.eq(path_component)),
+                    item_query: items::table.filter(items::data_store_id.eq(for_data_store.id)),
+                }
+                .get_result::<queries::ItemLoaderResult>(&self.conn)
+                .optional()?
             } else {
-                path_components::table
-                    .filter(path_components::path_component.eq(path_component))
-                    .filter(path_components::parent_component_id.is_null())
-                    .inner_join(items::table)
-                    .filter(items::data_store_id.eq(for_data_store.id))
-                    .first::<(PathComponent, Item)>(&self.conn)
-                    .optional()?
+                queries::ItemLoader {
+                    path_query: path_components::table
+                        .filter(path_components::parent_component_id.is_null())
+                        .filter(path_components::path_component.eq(path_component)),
+                    item_query: items::table.filter(items::data_store_id.eq(for_data_store.id)),
+                }
+                .get_result::<queries::ItemLoaderResult>(&self.conn)
+                .optional()?
             };
 
-            if let Some((path_component, item)) = component_db_item {
-                let current_item = self.load_item(path_component, item, &current_sync_time)?;
+            if let Some((path, item, fs_metadata, mod_metadata)) = db_item {
+                let current_item =
+                    self.load_item(path, item, fs_metadata, mod_metadata, &current_sync_time)?;
                 current_sync_time = current_item.sync_time.as_ref().unwrap().clone();
 
                 result.push(current_item);
@@ -547,18 +548,24 @@ impl MetadataDB {
 
     /// Loads all child items of the given internal db item.
     fn load_child_items(&self, parent_item: &DBItemInternal) -> Result<Vec<DBItemInternal>> {
-        let dir_entries = path_components::table
-            .filter(path_components::parent_component_id.eq(parent_item.path_component.id))
-            .inner_join(items::table)
-            .filter(items::data_store_id.eq(parent_item.item.data_store_id))
-            .load::<(PathComponent, Item)>(&self.conn)?;
+        let dir_entries = queries::ItemLoader {
+            path_query: path_components::table
+                .filter(path_components::parent_component_id.eq(parent_item.path_component.id)),
+            item_query: items::table
+                .filter(items::data_store_id.eq(parent_item.item.data_store_id)),
+        }
+        .get_results::<queries::ItemLoaderResult>(&self.conn)?;
 
         let child_items: Result<Vec<_>> = dir_entries
             .into_iter()
-            .map(|(path, item)| {
-                let internal_item =
-                    self.load_item(path, item, &parent_item.sync_time.as_ref().unwrap())?;
-                Ok(internal_item)
+            .map(|(path, item, fs_metadata, mod_metadata)| {
+                Ok(self.load_item(
+                    path,
+                    item,
+                    fs_metadata,
+                    mod_metadata,
+                    &parent_item.sync_time.as_ref().unwrap(),
+                )?)
             })
             .collect();
         child_items
@@ -604,17 +611,10 @@ impl MetadataDB {
         &self,
         path_component: PathComponent,
         item: Item,
+        fs_metadata: Option<FileSystemMetadata>,
+        mod_metadata: Option<ModMetadata>,
         parent_sync_time: &VersionVector<i64>,
     ) -> Result<DBItemInternal> {
-        let fs_metadata = file_system_metadatas::table
-            .find(item.id)
-            .first::<FileSystemMetadata>(&self.conn)
-            .optional()?;
-        let mod_metadata = mod_metadatas::table
-            .find(item.id)
-            .first::<ModMetadata>(&self.conn)
-            .optional()?;
-
         let mut current_item =
             DBItemInternal::from_db_query(path_component, item, fs_metadata, mod_metadata);
 
@@ -679,8 +679,8 @@ impl MetadataDB {
         let name = name.to_lowercase();
 
         let existing_path = path_components::table
-            .filter(path_components::path_component.eq(&name))
             .filter(path_components::parent_component_id.eq(parent.id))
+            .filter(path_components::path_component.eq(&name))
             .first::<PathComponent>(&self.conn)
             .optional()?;
         if let Some(existing_path) = existing_path {
@@ -695,8 +695,8 @@ impl MetadataDB {
             .execute(&self.conn)?;
 
         let new_path = path_components::table
-            .filter(path_components::path_component.eq(&name))
             .filter(path_components::parent_component_id.eq(parent.id))
+            .filter(path_components::path_component.eq(&name))
             .first::<PathComponent>(&self.conn)?;
         Ok(new_path)
     }
@@ -791,22 +791,18 @@ impl MetadataDB {
         modifying_data_store_id: i64,
         modification_time: i64,
     ) -> Result<()> {
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
-            let changes = diesel::update(mod_metadatas::table.find(item.id))
-                .set(mod_metadata::UpdateLastMod {
-                    last_mod_store_id: modifying_data_store_id,
-                    last_mod_store_time: modification_time,
-                })
-                .execute(&self.conn)?;
-            assert_eq!(
-                changes, 1,
-                "Must not add modification event for non existing mod_metadata!"
-            );
+        let changes = diesel::update(mod_metadatas::table.find(item.id))
+            .set(mod_metadata::UpdateLastMod {
+                last_mod_store_id: modifying_data_store_id,
+                last_mod_store_time: modification_time,
+            })
+            .execute(&self.conn)?;
+        assert_eq!(
+            changes, 1,
+            "Must not add modification event for non existing mod_metadata!"
+        );
 
-            self.bump_path_mod_times(&item, modifying_data_store_id, modification_time)?;
-
-            Ok(())
-        })?;
+        self.bump_path_mod_times(&item, modifying_data_store_id, modification_time)?;
 
         Ok(())
     }
