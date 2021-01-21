@@ -189,7 +189,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     pub fn sync_item_internal(&self, sync_request: IntSyncRequest) -> Result<IntSyncResponse> {
         let local_item = self
             .db_access
-            .get_local_data_item(&sync_request.item_path)?;
+            .get_local_data_item(&sync_request.item_path, true)?;
         if !self.does_disk_item_match_db_item(&local_item, false)? {
             panic!("Must not sync if disk content is not correctly indexed in DB.");
         }
@@ -289,7 +289,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         remote_mapper: &DataStoreIDMapper,
     ) -> Result<()> {
         // STEP 1) Perform the synchronization request to the other data_store.
-        let local_item = self.db_access.get_local_data_item(&path)?;
+        let local_item = self.db_access.get_local_data_item(&path, true)?;
         let localized_path = path
             .clone()
             .parent_mut()
@@ -558,7 +558,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let target_local_path = self.fs_access.pending_files_relative().join_mut(path_hash);
 
         // TODO: This should later on be further abstracted to allow actual downloads/streaming.
-        let other_db_item = other.db_access.get_local_data_item(&path)?;
+        let other_db_item = other.db_access.get_local_data_item(&path, false)?;
         let stream_from_other = other.fs_access.read_file(&other_db_item.path)?;
 
         self.fs_access.create_file(&target_local_path)?;
@@ -668,7 +668,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let dir_creation_time = Self::fs_to_date_time(&metadata.creation_time());
         let dir_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
 
-        let db_item = self.db_access.get_local_data_item(&path)?;
+        let db_item = self.db_access.get_local_data_item(&path, false)?;
         match db_item.content {
             metadata_db::ItemType::FILE { .. } => {
                 // Delete existing file
@@ -726,7 +726,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let file_creation_time = Self::fs_to_date_time(&metadata.creation_time());
         let file_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
 
-        let db_item = self.db_access.get_local_data_item(path)?;
+        let db_item = self.db_access.get_local_data_item(path, false)?;
         match db_item.content {
             metadata_db::ItemType::FILE { metadata, .. } => {
                 // We got an existing entry, see if it requires updating.

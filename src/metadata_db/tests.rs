@@ -51,7 +51,7 @@ fn delete_data_item(metadata_store: &MetadataDB, name: &str) {
 }
 fn assert_mod_time(metadata_store: &MetadataDB, name: &str, key: i64, value: i64) {
     let item = metadata_store
-        .get_local_data_item(&RelativePath::from_path(name))
+        .get_local_data_item(&RelativePath::from_path(name), true)
         .unwrap();
     match item.content {
         ItemType::FILE { .. } => assert_eq!(item.mod_time()[&key], value),
@@ -61,7 +61,7 @@ fn assert_mod_time(metadata_store: &MetadataDB, name: &str, key: i64, value: i64
 }
 fn assert_sync_time(metadata_store: &MetadataDB, name: &str, key: i64, value: i64) {
     let item = metadata_store
-        .get_local_data_item(&RelativePath::from_path(name))
+        .get_local_data_item(&RelativePath::from_path(name), true)
         .unwrap();
     assert_eq!(item.sync_time[&key], value);
 }
@@ -181,12 +181,12 @@ fn correctly_persevere_case_sensitivity() {
 
     // Query should work with any case sensitivity.
     let file = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sUB/fOLDER/fILE"))
+        .get_local_data_item(&RelativePath::from_path("sUB/fOLDER/fILE"), true)
         .unwrap();
     assert_eq!(file.path.name(), "fILE");
     assert_eq!(file.metadata().case_sensitive_name, "fILE");
     let file = metadata_store
-        .get_local_data_item(&RelativePath::from_path("Sub/Folder/File"))
+        .get_local_data_item(&RelativePath::from_path("Sub/Folder/File"), true)
         .unwrap();
     assert_eq!(file.path.name(), "fILE");
     assert_eq!(file.metadata().case_sensitive_name, "fILE");
@@ -223,7 +223,7 @@ fn correctly_inserts_synced_data_items() {
 
     // First of, lets try bumping some synchronization vector times.
     let mut target_data_item = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub"))
+        .get_local_data_item(&RelativePath::from_path("sub"), true)
         .unwrap();
     target_data_item.sync_time[&remote_store.id] = 10;
     metadata_store
@@ -240,7 +240,7 @@ fn correctly_inserts_synced_data_items() {
 
     // Also try to 'partially' bump the sync times.
     let mut target_data_item = metadata_store
-        .get_local_data_item(&RelativePath::from_path(""))
+        .get_local_data_item(&RelativePath::from_path(""), true)
         .unwrap();
     target_data_item.sync_time[&local_store.id] = 5;
     target_data_item.sync_time[&remote_store.id] = 7;
@@ -262,7 +262,7 @@ fn correctly_inserts_synced_data_items() {
 
     // Let's query an item, change it and re-synchronize it into our local db
     let mut file = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+        .get_local_data_item(&RelativePath::from_path("sub/folder/file"), true)
         .unwrap();
 
     // ...this should be as if the second store overwrites the local one with a new version.
@@ -282,21 +282,21 @@ fn correctly_inserts_synced_data_items() {
 
     // Check if the synced item looks right.
     let file_after_update = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+        .get_local_data_item(&RelativePath::from_path("sub/folder/file"), true)
         .unwrap();
     assert_eq!(file_after_update.sync_time[&local_store.id], 5);
     assert_eq!(file_after_update.sync_time[&remote_store.id], 1024);
     assert_eq!(file_after_update.mod_time()[&local_store.id], 0);
     assert_eq!(file_after_update.mod_time()[&remote_store.id], 42);
     let root_item_after_update = metadata_store
-        .get_local_data_item(&RelativePath::from_path(""))
+        .get_local_data_item(&RelativePath::from_path(""), true)
         .unwrap();
     assert_eq!(root_item_after_update.mod_time()[&local_store.id], 3);
     assert_eq!(root_item_after_update.mod_time()[&remote_store.id], 42);
 
     // Try a more complicated case where we change a folder to be a file
     let mut folder = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub/folder"))
+        .get_local_data_item(&RelativePath::from_path("sub/folder"), true)
         .unwrap();
 
     let new_sync_time = VersionVector::from_initial_values(vec![(&remote_store.id, 2048)]);
@@ -316,14 +316,14 @@ fn correctly_inserts_synced_data_items() {
 
     // We expect the file below to be implicitly deleted and have the appropriate sync time.
     let item_after_update = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+        .get_local_data_item(&RelativePath::from_path("sub/folder/file"), true)
         .unwrap();
     assert!(item_after_update.is_deletion());
     assert_eq!(item_after_update.sync_time[&remote_store.id], 2048);
 
     // Another interesting case is if we receive a single deletion notice.
     let mut root = metadata_store
-        .get_local_data_item(&RelativePath::from_path(""))
+        .get_local_data_item(&RelativePath::from_path(""), true)
         .unwrap();
 
     let new_sync_time = VersionVector::from_initial_values(vec![(&remote_store.id, 4096)]);
@@ -334,12 +334,12 @@ fn correctly_inserts_synced_data_items() {
         .unwrap();
 
     let root_after_update = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+        .get_local_data_item(&RelativePath::from_path("sub/folder/file"), true)
         .unwrap();
     assert!(root_after_update.is_deletion());
     assert_eq!(root_after_update.sync_time[&remote_store.id], 4096,);
     let file_item_after_update = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub/folder/file"))
+        .get_local_data_item(&RelativePath::from_path("sub/folder/file"), true)
         .unwrap();
     assert!(file_item_after_update.is_deletion());
     assert_eq!(file_item_after_update.sync_time[&remote_store.id], 4096,);

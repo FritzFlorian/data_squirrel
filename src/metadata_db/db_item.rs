@@ -78,7 +78,9 @@ impl DBItem {
         let (item_type, file_name) = if item.item.is_deleted {
             (
                 ItemType::DELETION,
-                item.path_component.path_component.clone(),
+                RelativePath::from_path(item.path_component.full_path)
+                    .name()
+                    .to_owned(),
             )
         } else {
             // Query the creation and last modification info from the metadata.
@@ -121,7 +123,9 @@ impl DBItem {
                 if let Some(metadata) = &parent_item.fs_metadata {
                     metadata.case_sensitive_name.clone()
                 } else {
-                    parent_item.path_component.path_component.clone()
+                    RelativePath::from_path(&parent_item.path_component.full_path)
+                        .name()
+                        .to_owned()
                 }
             })
             .collect();

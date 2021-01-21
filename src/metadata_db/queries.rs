@@ -5,9 +5,46 @@ use diesel::sqlite::Sqlite;
 
 use super::*;
 
+#[derive(Debug, Clone, QueryId)]
+pub struct AllPathComponents {
+    pub path_string: String,
+}
+impl QueryFragment<Sqlite> for AllPathComponents {
+    fn walk_ast(&self, mut out: AstPass<Sqlite>) -> QueryResult<()> {
+        out.push_sql("SELECT * FROM path_components WHERE full_path IN ");
+        out.push_sql("(");
+        {
+            out.push_sql("WITH RECURSIVE paths(full_path, rest_path) AS ");
+            out.push_sql("(");
+            {
+                out.push_sql("SELECT '/' AS full_path, substr(");
+                out.push_bind_param::<Text, _>(&self.path_string)?;
+                out.push_sql(", 2) as rest_path ");
+
+                out.push_sql("UNION ");
+
+                out.push_sql("SELECT paths.full_path || substr(paths.rest_path, 1, instr(paths.rest_path, '/')) as full_path, ");
+                out.push_sql(
+                    "substr(paths.rest_path, instr(paths.rest_path, '/') + 1) as rest_path ",
+                );
+                out.push_sql("FROM paths ");
+            }
+            out.push_sql(") ");
+            out.push_sql("SELECT full_path FROM paths ")
+        }
+        out.push_sql(")");
+
+        Ok(())
+    }
+}
+impl Query for AllPathComponents {
+    type SqlType = path_components::SqlType;
+}
+impl RunQueryDsl<SqliteConnection> for AllPathComponents {}
+
 /// Construct a query to load a single database item.
 /// This includes the path_component, item, fs_metadata and mod_metadata belonging to the item.
-#[derive(QueryId)]
+#[derive(Debug, Clone, QueryId)]
 pub struct ItemLoader<PQ, IQ> {
     pub path_query: PQ,
     pub item_query: IQ,

@@ -12,10 +12,10 @@ pub fn migrate(conn: &SqliteConnection) -> Result<()> {
 // Creates an index to search for data items based on their path.
 // This is the main search we might do in our DB and thus worth speeding up.
 fn create_index_path_components(conn: &SqliteConnection) -> Result<()> {
-    sql_query(
-        "CREATE UNIQUE INDEX path_components_idx ON path_components(parent_component_id, path_component)",
-    )
-    .execute(conn)?;
+    sql_query("CREATE UNIQUE INDEX path_components_full_path_idx ON path_components(full_path)")
+        .execute(conn)?;
+    sql_query("CREATE INDEX path_components_parent_idx ON path_components(parent_id)")
+        .execute(conn)?;
     Ok(())
 }
 

@@ -25,9 +25,8 @@ table! {
 table! {
     path_components (id) {
         id -> BigInt,
-
-        parent_component_id -> Nullable<BigInt>,
-        path_component -> Text,
+        parent_id -> Nullable<BigInt>,
+        full_path -> Text,
     }
 }
 

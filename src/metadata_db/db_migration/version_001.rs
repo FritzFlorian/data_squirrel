@@ -63,13 +63,11 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
 fn create_table_path_components(conn: &SqliteConnection) -> Result<()> {
     sql_query(
         "CREATE TABLE path_components(
-                id                  INTEGER PRIMARY KEY NOT NULL,
-                
-                parent_component_id      INTEGER,
-                path_component           TEXT NOT NULL,
+                id                  INTEGER PRIMARY KEY NOT NULL UNIQUE,  
+                parent_id           INTEGER,
+                full_path           TEXT NOT NULL UNIQUE,
 
-                UNIQUE(path_component, parent_component_id),
-                FOREIGN KEY(parent_component_id)     REFERENCES path_components(id)
+                FOREIGN KEY(parent_id) REFERENCES path_components(id)
             )",
     )
     .execute(conn)?;

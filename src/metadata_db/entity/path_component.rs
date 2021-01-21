@@ -4,14 +4,13 @@ use super::schema::path_components;
 #[table_name = "path_components"]
 pub struct PathComponent {
     pub id: i64,
-
-    pub parent_component_id: Option<i64>,
-    pub path_component: String,
+    pub parent_id: Option<i64>,
+    pub full_path: String,
 }
 
 #[derive(Insertable)]
 #[table_name = "path_components"]
 pub struct InsertFull<'a> {
-    pub parent_component_id: Option<i64>,
-    pub path_component: &'a str,
+    pub parent_id: Option<i64>,
+    pub full_path: &'a str,
 }
