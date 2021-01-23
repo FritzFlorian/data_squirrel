@@ -195,23 +195,27 @@ impl MetadataDB {
     }
 
     /// Queries all item names (NOT case sensitive) present in the given dir_path.
-    pub fn get_local_child_items(&self, dir_path: &RelativePath) -> Result<Vec<DBItem>> {
+    pub fn get_local_child_items(
+        &self,
+        dir_path: &RelativePath,
+        load_timestamps: bool,
+    ) -> Result<Vec<DBItem>> {
         self.conn.transaction::<_, MetadataDBError, _>(|| {
             let local_data_store = self.get_local_data_store()?;
-            let dir_path_items = self.load_data_items_on_path(&local_data_store, dir_path, true)?;
+            let mut dir_path_items =
+                self.load_data_items_on_path(&local_data_store, dir_path, load_timestamps)?;
 
             if dir_path_items.len() == dir_path.get_path_components().len() {
                 // The parent directory exists, go and inspect it further.
                 // The last item in the chain of DB entries is the desired folder item.
-                let dir_item = dir_path_items.last().unwrap();
+                let dir_item = dir_path_items.last_mut().unwrap();
 
                 // Query its content/children.
-                self.load_child_items(&dir_item)?
+                Ok(self
+                    .load_child_items(&dir_item, load_timestamps)?
                     .into_iter()
-                    .map(|internal_item| {
-                        Ok(DBItem::from_internal_item(&dir_path_items, internal_item))
-                    })
-                    .collect()
+                    .map(|internal_item| DBItem::from_internal_item(&dir_path_items, internal_item))
+                    .collect())
             } else {
                 // The parent path is not in the DB, thus we have no child items.
                 Ok(vec![])
@@ -578,7 +582,11 @@ impl MetadataDB {
     }
 
     /// Loads all child items of the given internal db item.
-    fn load_child_items(&self, parent_item: &DBItemInternal) -> Result<Vec<DBItemInternal>> {
+    fn load_child_items(
+        &self,
+        parent_item: &DBItemInternal,
+        load_timestamps: bool,
+    ) -> Result<Vec<DBItemInternal>> {
         let dir_entries = queries::ItemLoader {
             path_query: path_components::table
                 .filter(path_components::parent_id.eq(parent_item.path_component.id)),
@@ -590,13 +598,21 @@ impl MetadataDB {
         let child_items: Result<Vec<_>> = dir_entries
             .into_iter()
             .map(|(path, item, fs_metadata, mod_metadata)| {
-                Ok(self.load_item(
-                    path,
-                    item,
-                    fs_metadata,
-                    mod_metadata,
-                    &parent_item.sync_time.as_ref().unwrap(),
-                )?)
+                if load_timestamps {
+                    Ok(self.load_item(
+                        path,
+                        item,
+                        fs_metadata,
+                        mod_metadata,
+                        &parent_item.sync_time.as_ref().unwrap(),
+                    )?)
+                } else {
+                    let mut item =
+                        DBItemInternal::from_db_query(path, item, fs_metadata, mod_metadata);
+                    item.mod_time = Some(VersionVector::new());
+                    item.sync_time = Some(VersionVector::new());
+                    Ok(item)
+                }
             })
             .collect();
         child_items
@@ -726,11 +742,19 @@ impl MetadataDB {
             return Ok(existing_path);
         }
 
+        let highest_id = path_components::table
+            .order(path_components::id.desc())
+            .limit(1)
+            .select(path_components::id)
+            .first::<i64>(&self.conn)
+            .optional()?;
+        let highest_id = highest_id.unwrap_or(0);
         diesel::insert_into(path_components::table)
-            .values(path_component::InsertFull {
-                parent_id: parent.map(|parent| parent.id),
-                full_path: &current_path_string,
-            })
+            .values((
+                path_components::id.eq(highest_id + 1),
+                path_components::parent_id.eq(parent.map(|parent| parent.id)),
+                path_components::full_path.eq(&current_path_string),
+            ))
             .execute(&self.conn)?;
 
         let new_path = path_components::table
@@ -751,7 +775,7 @@ impl MetadataDB {
 
         // Make sure to delete children of folders recursively
         if !path_items.last().unwrap().item.is_file {
-            let dir_entries = self.load_child_items(&path_items.last().unwrap())?;
+            let dir_entries = self.load_child_items(&path_items.last().unwrap(), false)?;
 
             for dir_entry in dir_entries {
                 path_items.push(dir_entry);
@@ -911,7 +935,7 @@ impl MetadataDB {
         let mut cleaned_up_items = 0;
 
         let parent_sync_time = parent_item.sync_time.as_ref().unwrap();
-        for child_item in self.load_child_items(parent_item)? {
+        for child_item in self.load_child_items(parent_item, true)? {
             let mut times_to_keep = Vec::new();
             for child_sync_entry in child_item.sync_time.as_ref().unwrap().iter() {
                 let (data_store_id, time) = child_sync_entry;

@@ -126,7 +126,7 @@ fn correctly_enter_data_items() {
 
     // Check if child queries work
     let children = metadata_store
-        .get_local_child_items(&RelativePath::from_path(""))
+        .get_local_child_items(&RelativePath::from_path(""), true)
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_folder());
@@ -137,7 +137,7 @@ fn correctly_enter_data_items() {
     delete_data_item(&metadata_store, "sub/folder");
     delete_data_item(&metadata_store, "sub");
     let children = metadata_store
-        .get_local_child_items(&RelativePath::from_path(""))
+        .get_local_child_items(&RelativePath::from_path(""), true)
         .unwrap();
     assert_eq!(children.len(), 1);
     assert!(children[0].is_deletion());
@@ -198,7 +198,7 @@ fn correctly_persevere_case_sensitivity() {
 
     // Check if child queries work
     let children = metadata_store
-        .get_local_child_items(&RelativePath::from_path("SUB/FOLDER"))
+        .get_local_child_items(&RelativePath::from_path("SUB/FOLDER"), true)
         .unwrap();
     assert_eq!(children.len(), 2);
     assert!(children.iter().any(|child| {

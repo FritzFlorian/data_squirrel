@@ -7,10 +7,3 @@ pub struct PathComponent {
     pub parent_id: Option<i64>,
     pub full_path: String,
 }
-
-#[derive(Insertable)]
-#[table_name = "path_components"]
-pub struct InsertFull<'a> {
-    pub parent_id: Option<i64>,
-    pub full_path: &'a str,
-}

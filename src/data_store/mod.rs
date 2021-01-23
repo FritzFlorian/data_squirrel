@@ -227,7 +227,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 } => {
                     let child_item_names = self
                         .db_access
-                        .get_local_child_items(&sync_request.item_path)?
+                        .get_local_child_items(&sync_request.item_path, true)?
                         .into_iter()
                         .map(|item| item.path.name().to_owned())
                         .collect();
@@ -498,7 +498,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         }
                         // ...and also into local items (these should simply get deleted,
                         // but we can optimize this later on after the basic works).
-                        for local_child in self.db_access.get_local_child_items(&localized_path)? {
+                        for local_child in self
+                            .db_access
+                            .get_local_child_items(&localized_path, true)?
+                        {
                             if !visited_items.contains(&local_child.path.name().to_lowercase()) {
                                 self.sync_from_other_store_recursive(
                                     &from_other,
@@ -827,7 +830,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // Lastly we perform the 'negative' operation of the scan process:
         // We load all known entries of the directory and see if there are any that are
         // no longer present on disk, thus signaling a deletion.
-        let child_items = self.db_access.get_local_child_items(&dir_path)?;
+        let child_items = self.db_access.get_local_child_items(&dir_path, false)?;
         for child_item in child_items.iter() {
             if !lower_case_entries.contains(&child_item.path.name().to_lowercase()) {
                 let child_item_path = child_item.path.clone();
