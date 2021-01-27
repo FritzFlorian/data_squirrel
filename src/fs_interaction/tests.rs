@@ -134,7 +134,7 @@ fn detects_duplicates() {
     assert_eq!(content.len(), 5);
     content.iter().for_each(|item| {
         if item.relative_path.name().to_lowercase() == "abc" {
-            assert_eq!(item.issues, vec![Issue::Duplicate]);
+            assert_eq!(item.issue, Some(Issue::Duplicate));
         }
     });
 }

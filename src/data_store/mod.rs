@@ -632,7 +632,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 return Ok(false);
             }
             let disk_entry = matching_disk_entry.unwrap();
-            if !disk_entry.issues.is_empty() {
+            if disk_entry.issue.is_some() {
                 return Ok(false);
             }
 
@@ -822,7 +822,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             for item in items {
                 lower_case_entries.insert(item.relative_path.name().to_lowercase());
 
-                if item.issues.is_empty() {
+                if item.issue.is_none() {
                     let item_metadata = item.metadata.as_ref().unwrap();
                     match item_metadata.file_type() {
                         virtual_fs::FileType::File => {
@@ -842,7 +842,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     // TODO: Properly collect issues and report them to the caller.
                     eprintln!(
                         "Issues with data item {:?}: {:?}",
-                        item.relative_path, item.issues
+                        item.relative_path, item.issue
                     );
                 }
             }

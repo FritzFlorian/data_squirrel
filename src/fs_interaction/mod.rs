@@ -9,12 +9,13 @@ pub use self::errors::*;
 use filetime::FileTime;
 use ring::digest::{Context, SHA256};
 use std::io;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 const METADATA_DIR: &str = ".__data_squirrel__";
 const METADATA_DB_FILE: &str = "database.sqlite";
 const LOCK_FILE: &str = "lock";
+const IGNORE_FILE: &str = "ignored.txt";
 const PENDING_FILES_DIR: &str = "pending_files";
 const SNAPSHOT_DIR: &str = "snapshots";
 
@@ -25,6 +26,8 @@ pub struct FSInteraction<FS: virtual_fs::FS> {
     fs: FS,
     root_path: PathBuf,
     locked: bool,
+
+    ignore_rules: Vec<glob::Pattern>,
 }
 pub type DefaultFSInteraction = FSInteraction<virtual_fs::WrapperFS>;
 
@@ -46,9 +49,12 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             fs: virtual_fs,
             root_path: data_store_root,
             locked: false,
+            ignore_rules: vec![],
         };
-        result.create_metadata_directories()?;
         result.acquire_exclusive_lock()?;
+
+        result.ensure_metadata_dirs_exist()?;
+        result.load_ignore_rules()?;
 
         Ok(result)
     }
@@ -107,10 +113,8 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         // We want to detect duplicates during this pass. To do so, we sort the vector and
         // keep the last file name around.
         let mut last_filename_lowercase = String::new();
-        let mut duplicate_count = 0;
         dir_entries.sort_by(|a, b| a.file_name.partial_cmp(&b.file_name).unwrap());
         for dir_entry in dir_entries {
-            // FIXME: Properly report non-unicode names in file systems.
             let file_name = dir_entry
                 .file_name
                 .to_str()
@@ -122,28 +126,41 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             }
 
             // Create basic data_item for remaining, valid entries.
+            let relative_path = relative_path.join(file_name.to_string());
             let mut data_item = DataItem {
-                relative_path: relative_path.join(file_name.to_string()),
+                relative_path: relative_path,
                 metadata: None,
-                issues: Vec::new(),
+                issue: None,
             };
 
-            // Check if item is a duplicate (when ignoring case in names).
-            // TODO: This comparison can be made more performant if we do not copy it to a string.
-            let filename_lowercase = file_name.to_lowercase();
-            if filename_lowercase == last_filename_lowercase {
-                duplicate_count += 1;
-                data_item.issues.push(Issue::Duplicate);
-                if duplicate_count < 2 {
-                    entries.last_mut().unwrap().issues.push(Issue::Duplicate);
+            // Check if any ignore rules match
+            if data_item.issue.is_none() {
+                let path_string = data_item.relative_path.get_path_components().join("/");
+                let is_ignored = self
+                    .ignore_rules
+                    .iter()
+                    .any(|rule| rule.matches(&path_string));
+                if is_ignored {
+                    data_item.issue = Some(Issue::Ignored);
                 }
-            } else {
-                duplicate_count = 0;
             }
-            last_filename_lowercase = filename_lowercase;
+
+            // Check if item is a duplicate (when ignoring case in names).
+            if data_item.issue.is_none() {
+                let filename_lowercase = file_name.to_lowercase();
+                if filename_lowercase == last_filename_lowercase {
+                    data_item.issue = Some(Issue::Duplicate);
+                    if entries.last().unwrap().issue.is_none() {
+                        entries.last_mut().unwrap().issue = Some(Issue::Duplicate);
+                    }
+                }
+                last_filename_lowercase = filename_lowercase;
+            }
 
             // Try to load metadata for the item and detect possible issues.
-            self.load_metadata(&mut data_item);
+            if data_item.issue.is_none() {
+                self.load_metadata(&mut data_item);
+            }
 
             entries.push(data_item);
         }
@@ -217,15 +234,16 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             // Catch issues with metadata that we do not want to sync.
             // Examples are e.g. issues in not owning a file or similar.
             if metadata.file_type() == virtual_fs::FileType::Link {
-                data_item.issues.push(Issue::SoftLinksForbidden);
+                data_item.issue = Some(Issue::SoftLinksForbidden);
             }
             // FIXME: Add code that checks if we OWN the file.
             //        We only plan to move files for the executing user (desktop usage on files),
             //        that way we can avoid nearly all issues related to permissions, as we can
             //        for example always overwrite a read-only file if we own it.
+
             data_item.metadata = Some(metadata);
         } else {
-            data_item.issues.push(Issue::CanNotReadMetadata);
+            data_item.issue = Some(Issue::CanNotReadMetadata);
         }
     }
 
@@ -291,9 +309,35 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
     }
 
     // Ensures all metadata directories exist.
-    fn create_metadata_directories(&self) -> Result<()> {
+    fn ensure_metadata_dirs_exist(&self) -> Result<()> {
         self.fs.create_dir(self.pending_files_dir(), true)?;
         self.fs.create_dir(self.snapshot_dir(), true)?;
+
+        Ok(())
+    }
+
+    // Creates the file holding igonored file patterns
+    fn load_ignore_rules(&mut self) -> Result<()> {
+        let result = self.fs.create_file(self.ignore_path());
+        if result.is_err()
+            && result.as_ref().err().unwrap().kind() != std::io::ErrorKind::AlreadyExists
+        {
+            // Escalate up if there are errors, if it simply exists we are good.
+            result?
+        }
+
+        let rules_file_stream = self.fs.read_file(self.ignore_path())?;
+        let buf_reader = BufReader::new(rules_file_stream);
+        for line in buf_reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+
+            let glob_pattern =
+                glob::Pattern::new(&line).expect("Could not compile ignore-rules glob pattern!");
+            self.ignore_rules.push(glob_pattern);
+        }
 
         Ok(())
     }
@@ -342,6 +386,10 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         self.metadata_path().join(LOCK_FILE)
     }
 
+    fn ignore_path(&self) -> PathBuf {
+        self.metadata_path().join(IGNORE_FILE)
+    }
+
     pub fn pending_files_dir(&self) -> PathBuf {
         self.metadata_path().join(PENDING_FILES_DIR)
     }
@@ -374,7 +422,7 @@ impl<FS: virtual_fs::FS> Drop for FSInteraction<FS> {
 pub struct DataItem {
     pub relative_path: RelativePath,
     pub metadata: Option<virtual_fs::Metadata>,
-    pub issues: Vec<Issue>,
+    pub issue: Option<Issue>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -382,6 +430,7 @@ pub enum Issue {
     Duplicate,
     CanNotReadMetadata,
     SoftLinksForbidden,
+    Ignored,
     // Fixme: Add issue if we are not owner of the file.
 }
 

@@ -1,5 +1,6 @@
 extern crate chrono;
 extern crate data_encoding;
+extern crate glob;
 #[macro_use]
 extern crate diesel;
 extern crate filetime;

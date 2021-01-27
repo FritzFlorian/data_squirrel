@@ -57,6 +57,8 @@ impl MetadataDB {
     /// Should be run from time to time to decrease the DB size on disk.
     pub fn clean_up(&self) -> Result<usize> {
         let cleaned_sync_times = self.clean_up_local_sync_times()?;
+
+        diesel::sql_query("ANALYZE").execute(&self.conn)?;
         diesel::sql_query("VACUUM").execute(&self.conn)?;
 
         Ok(cleaned_sync_times)
