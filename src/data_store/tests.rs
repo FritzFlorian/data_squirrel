@@ -236,6 +236,19 @@ fn unidirectional_sync() {
     // The contents should now match without any conflicts
     dir_should_contain(&fs_1, "", vec!["sub-1", "sub-2", "file-2", "file-3"]);
     dir_should_contain(&fs_2, "", vec!["sub-1", "sub-2", "file-2", "file-3"]);
+
+    // Lastly, lets see about permission changes (for now only read-only bits).
+    let old_metadata = fs_1.metadata("file-2").unwrap();
+    fs_1.update_metadata("file-2", old_metadata.last_mod_time(), true)
+        .unwrap();
+
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    let other_metadata = fs_2.metadata("file-2").unwrap();
+    assert_eq!(other_metadata.read_only(), true);
 }
 
 #[test]
@@ -362,6 +375,53 @@ fn metadata_set_correctly_after_sync() {
             deleted_items: 0
         }
     );
+}
+
+#[test]
+fn can_sync_read_only_files() {
+    // Better do this on the real FS
+    let test_dir_1 = tempfile::tempdir().unwrap();
+    let test_dir_2 = tempfile::tempdir().unwrap();
+
+    let data_store_1 =
+        DefaultDataStore::create(test_dir_1.path(), "XYZ", "XYZ", "source-data-store").unwrap();
+    let data_store_2 =
+        DefaultDataStore::create(test_dir_2.path(), "XYZ", "XYZ", "source-data-store").unwrap();
+
+    // Create read-only file in store 1 and sync it to store 2
+    let file_path = test_dir_1.path().join("test.txt");
+    File::create(&file_path)
+        .unwrap()
+        .write_all(b"hello!")
+        .unwrap();
+    let mut permissions = std::fs::symlink_metadata(&file_path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&file_path, permissions).unwrap();
+
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // Now change it's content and try to sync it again.
+    let mut permissions = std::fs::symlink_metadata(&file_path).unwrap().permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&file_path, permissions).unwrap();
+    std::fs::write(&file_path, b"other content").unwrap();
+    let mut permissions = std::fs::symlink_metadata(&file_path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&file_path, permissions).unwrap();
+
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // We expect the target content to have changed but still be a read-only file.
+    let file_path = test_dir_2.path().join("test.txt");
+    let permissions = std::fs::symlink_metadata(&file_path).unwrap().permissions();
+    assert_eq!(permissions.readonly(), true);
+    assert_eq!(std::fs::read(&file_path).unwrap(), b"other content");
 }
 
 #[test]

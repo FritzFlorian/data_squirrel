@@ -303,6 +303,7 @@ impl MetadataDB {
         mod_time: chrono::NaiveDateTime,
         is_file: bool,
         hash: &str,
+        is_read_only: bool,
     ) -> Result<()> {
         self.run_transaction(|| {
             // We insert an item, bump the data stores version and mark all events with the version.
@@ -381,6 +382,8 @@ impl MetadataDB {
                     creation_time: creation_time,
                     mod_time: mod_time,
                     hash: &hash,
+
+                    is_read_only: is_read_only,
                 }).execute(&self.conn)?;
             let fs_metadata = file_system_metadatas::table.find(item.id).first::<FileSystemMetadata>(&self.conn)?;
 
@@ -542,6 +545,8 @@ impl MetadataDB {
                         creation_time: target_item.metadata().creation_time,
                         mod_time: target_item.metadata().mod_time,
                         hash: &target_item.metadata().hash,
+
+                        is_read_only: target_item.metadata().is_read_only,
                     }).execute(&self.conn)?;
 
                 // Mod Metadata is tricky, as we want to e.g. keep the mod_times associated with
@@ -1063,6 +1068,8 @@ impl MetadataDB {
                 creation_time: chrono::NaiveDateTime::from_timestamp(0, 0),
                 mod_time: chrono::NaiveDateTime::from_timestamp(0, 0),
                 hash: "",
+
+                is_read_only: false,
             })
             .execute(&self.conn)?;
 

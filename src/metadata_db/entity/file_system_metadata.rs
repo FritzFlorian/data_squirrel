@@ -9,6 +9,8 @@ pub struct FileSystemMetadata {
     pub creation_time: chrono::NaiveDateTime,
     pub mod_time: chrono::NaiveDateTime,
     pub hash: String,
+
+    pub is_read_only: bool,
 }
 
 #[derive(Insertable)]
@@ -20,6 +22,8 @@ pub struct InsertFull<'a> {
     pub creation_time: chrono::NaiveDateTime,
     pub mod_time: chrono::NaiveDateTime,
     pub hash: &'a str,
+
+    pub is_read_only: bool,
 }
 
 #[derive(AsChangeset)]
@@ -29,4 +33,6 @@ pub struct UpdateMetadata<'a> {
     pub creation_time: &'a chrono::NaiveDateTime,
     pub mod_time: &'a chrono::NaiveDateTime,
     pub hash: &'a str,
+
+    pub is_read_only: bool,
 }

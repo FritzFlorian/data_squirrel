@@ -112,6 +112,8 @@ fn create_table_file_system_metadatas(conn: &SqliteConnection) -> Result<()> {
                 creation_time           TEXT NOT NULL,
                 mod_time                TEXT NOT NULL,
                 hash                    TEXT NOT NULL,
+
+                is_read_only            INTEGER NOT NULL, 
     
                 FOREIGN KEY(id)   REFERENCES items(id)   ON DELETE CASCADE
             )",

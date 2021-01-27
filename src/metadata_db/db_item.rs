@@ -71,6 +71,8 @@ pub struct ItemFSMetadata {
     pub creation_time: chrono::NaiveDateTime,
     pub mod_time: chrono::NaiveDateTime,
     pub hash: String,
+
+    pub is_read_only: bool,
 }
 
 impl DBItem {
@@ -144,6 +146,8 @@ impl DBItem {
             mod_time: metadata.mod_time,
             creation_time: metadata.creation_time,
             hash: metadata.hash,
+
+            is_read_only: metadata.is_read_only,
         }
     }
 

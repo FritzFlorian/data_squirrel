@@ -41,6 +41,7 @@ fn insert_data_item(metadata_store: &MetadataDB, name: &str, is_file: bool) {
             NaiveDateTime::from_timestamp(0, 0),
             is_file,
             "",
+            false,
         )
         .unwrap();
 }

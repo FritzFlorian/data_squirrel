@@ -395,7 +395,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                                 remote_fs_metadata.mod_time.timestamp(),
                                 remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
                             ),
-                            false,
+                            remote_fs_metadata.is_read_only,
                         )?;
 
                         // ...remove local file/folder with same name.
@@ -670,6 +670,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
         let dir_creation_time = Self::fs_to_date_time(&metadata.creation_time());
         let dir_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
+        let is_read_only = metadata.read_only();
 
         let db_item = self.db_access.get_local_data_item(&path, false)?;
         match db_item.content {
@@ -685,11 +686,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     dir_mod_time,
                     false,
                     "",
+                    is_read_only,
                 )?;
             }
             metadata_db::ItemType::FOLDER { metadata, .. } => {
                 // Simply update the relevant metadata if it is out of sync.
-                if metadata.mod_time != dir_mod_time || metadata.case_sensitive_name != path.name()
+                if metadata.mod_time != dir_mod_time
+                    || metadata.case_sensitive_name != path.name()
+                    || metadata.is_read_only != is_read_only
                 {
                     result.changed_items += 1;
                     self.db_access.update_local_data_item(
@@ -698,6 +702,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         dir_mod_time,
                         false,
                         "",
+                        is_read_only,
                     )?;
                 }
             }
@@ -710,6 +715,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     dir_mod_time,
                     false,
                     "",
+                    is_read_only,
                 )?;
             }
         }
@@ -728,12 +734,15 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
         let file_creation_time = Self::fs_to_date_time(&metadata.creation_time());
         let file_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
+        let is_read_only = metadata.read_only();
 
         let db_item = self.db_access.get_local_data_item(path, false)?;
         match db_item.content {
             metadata_db::ItemType::FILE { metadata, .. } => {
                 // We got an existing entry, see if it requires updating.
-                if metadata.mod_time != file_mod_time || metadata.case_sensitive_name != path.name()
+                if metadata.mod_time != file_mod_time
+                    || metadata.case_sensitive_name != path.name()
+                    || metadata.is_read_only != is_read_only
                 {
                     result.changed_items += 1;
 
@@ -744,6 +753,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         file_mod_time,
                         true,
                         &hash,
+                        is_read_only,
                     )?;
                 } else if detect_bitrot {
                     let hash = self.fs_access.calculate_hash(&path)?;
@@ -770,6 +780,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     file_mod_time,
                     true,
                     &hash,
+                    false,
                 )?;
             }
         }

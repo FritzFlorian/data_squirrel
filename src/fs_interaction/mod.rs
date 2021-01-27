@@ -216,14 +216,13 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         if let Ok(metadata) = metadata {
             // Catch issues with metadata that we do not want to sync.
             // Examples are e.g. issues in not owning a file or similar.
-            // TODO: For now we have a rather 'simple' list of stuff we simply flag as an issue.
             if metadata.file_type() == virtual_fs::FileType::Link {
                 data_item.issues.push(Issue::SoftLinksForbidden);
             }
-            if metadata.read_only() {
-                data_item.issues.push(Issue::ReadOnly);
-            }
-
+            // FIXME: Add code that checks if we OWN the file.
+            //        We only plan to move files for the executing user (desktop usage on files),
+            //        that way we can avoid nearly all issues related to permissions, as we can
+            //        for example always overwrite a read-only file if we own it.
             data_item.metadata = Some(metadata);
         } else {
             data_item.issues.push(Issue::CanNotReadMetadata);
@@ -383,7 +382,7 @@ pub enum Issue {
     Duplicate,
     CanNotReadMetadata,
     SoftLinksForbidden,
-    ReadOnly,
+    // Fixme: Add issue if we are not owner of the file.
 }
 
 #[cfg(test)]

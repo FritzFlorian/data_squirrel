@@ -50,6 +50,8 @@ table! {
         creation_time -> Timestamp,
         mod_time -> Timestamp,
         hash -> Text,
+
+        is_read_only -> Bool,
     }
 }
 
