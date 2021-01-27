@@ -19,10 +19,19 @@ use crate::version_vector::VersionVector;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sqlite::SqliteConnection;
+use std::cell::RefCell;
 use std::cmp::max;
+
+const UPDATES_UNTIL_OPTIMIZATION: usize = 10_000;
 
 pub struct MetadataDB {
     conn: SqliteConnection,
+    // Caching local data store
+    local_datastore: RefCell<Option<DataStore>>,
+    // Optimize the DB after a big number of inserts
+    updates_since_optimization: RefCell<usize>,
+    // Allow to relax/disable nested transactions
+    is_bundled: RefCell<bool>,
 }
 
 impl MetadataDB {
@@ -31,6 +40,11 @@ impl MetadataDB {
     pub fn open(path: &str) -> Result<MetadataDB> {
         let result = MetadataDB {
             conn: SqliteConnection::establish(path)?,
+
+            local_datastore: RefCell::new(None),
+            updates_since_optimization: RefCell::new(0),
+
+            is_bundled: RefCell::new(false),
         };
 
         result.default_db_settings()?;
@@ -48,12 +62,40 @@ impl MetadataDB {
         Ok(cleaned_sync_times)
     }
 
+    // Run the given function 'bundled' on the database.
+    // This means, that the inner function is run inside a transaction and that we will turn off
+    // any nested transactions. In other words, all actions done inside are either executed as a
+    // unit or not at all.
+    // The main purpose of this is performance in certain situations, as we can bundle e.g.
+    // operations that update multiple items in a folder.
+    pub fn run_bundled<F: FnMut() -> std::result::Result<V, E>, V, E>(
+        &self,
+        mut func: F,
+    ) -> Result<std::result::Result<V, E>> {
+        let inner_result = self.run_transaction(|| {
+            *self.is_bundled.borrow_mut() = true;
+            let inner_result = func();
+            *self.is_bundled.borrow_mut() = false;
+
+            Ok(inner_result)
+        })?;
+
+        Ok(inner_result)
+    }
+    fn run_transaction<F: FnMut() -> Result<R>, R>(&self, mut func: F) -> Result<R> {
+        if *self.is_bundled.borrow_mut() {
+            func()
+        } else {
+            self.conn.transaction(|| func())
+        }
+    }
+
     /// Creates and returns the data set stored in the open MetadataDB.
     /// Currently, exactly one data set can be stored in one database.
     pub fn create_data_set(&self, unique_name_p: &str) -> Result<DataSet> {
         use self::schema::data_sets::dsl::*;
 
-        Ok(self.conn.transaction(|| {
+        Ok(self.run_transaction(|| {
             if data_sets.first::<DataSet>(&self.conn).optional()?.is_some() {
                 return Err(MetadataDBError::ViolatesDBConsistency {
                     message: "Must only have ONE data_set per database!",
@@ -113,7 +155,7 @@ impl MetadataDB {
     pub fn create_data_store(&self, data_store: &data_store::InsertFull) -> Result<DataStore> {
         use diesel::dsl::*;
 
-        let result = self.conn.transaction(|| {
+        let result = self.run_transaction(|| {
             // Check DB consistency (for only ONE local data store)
             if data_store.is_this_store {
                 let this_store_already_exists = select(exists(
@@ -150,9 +192,35 @@ impl MetadataDB {
     pub fn get_local_data_store(&self) -> Result<DataStore> {
         use self::schema::data_stores::dsl::*;
 
-        Ok(data_stores
-            .filter(is_this_store.eq(true))
-            .first::<DataStore>(&self.conn)?)
+        let mut cache = self.local_datastore.borrow_mut();
+        if let Some(cache_content) = cache.as_mut() {
+            Ok(cache_content.clone())
+        } else {
+            let loaded_store = data_stores
+                .filter(is_this_store.eq(true))
+                .first::<DataStore>(&self.conn)?;
+
+            *cache = Some(loaded_store.clone());
+
+            Ok(loaded_store)
+        }
+    }
+
+    /// Helper that increases the version of the local data store.
+    /// Frequently used when working with data items.
+    fn increase_local_time(&self) -> Result<i64> {
+        // Update cached value.
+        let mut data_store = self.get_local_data_store()?;
+        data_store.time += 1;
+        let result = data_store.time;
+        *self.local_datastore.borrow_mut() = Some(data_store);
+
+        // Update actual value.
+        diesel::update(data_stores::table.filter(data_stores::is_this_store.eq(true)))
+            .set(data_stores::time.eq(data_stores::time + 1))
+            .execute(&self.conn)?;
+
+        Ok(result)
     }
 
     /// Queries a data item from the DB and returns it.
@@ -164,7 +232,7 @@ impl MetadataDB {
     ) -> Result<DBItem> {
         // Any operation involving consistency of sync-time stamps and/or parent-child relations
         // between items in the database requires a consistent view of the invariants held.
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
+        self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
             let mut path_items =
                 self.load_data_items_on_path(&local_data_store, &path, load_timestamps)?;
@@ -200,7 +268,7 @@ impl MetadataDB {
         dir_path: &RelativePath,
         load_timestamps: bool,
     ) -> Result<Vec<DBItem>> {
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
+        self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
             let mut dir_path_items =
                 self.load_data_items_on_path(&local_data_store, dir_path, load_timestamps)?;
@@ -236,11 +304,10 @@ impl MetadataDB {
         is_file: bool,
         hash: &str,
     ) -> Result<()> {
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
+        self.run_transaction(|| {
             // We insert an item, bump the data stores version and mark all events with the version.
-            self.increase_local_time()?;
+            let new_time = self.increase_local_time()?;
             let local_data_store = self.get_local_data_store()?;
-            let new_time = local_data_store.time;
 
             // Load all existing items on the given path.
             let mut path_items =
@@ -269,8 +336,7 @@ impl MetadataDB {
                 }
 
                 // ...update it to reflect the change.
-                diesel::update(items::table)
-                    .filter(items::id.eq(existing_item.item.id))
+                diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
                     .set((
                         items::is_deleted.eq(false),
                         items::is_file.eq(is_file)
@@ -347,6 +413,7 @@ impl MetadataDB {
             // Add the modification event (both changes and newly created items require mod events).
             self.add_mod_event(&path_items, local_data_store.id, new_time)?;
 
+            self.notify_change_for_optimization()?;
             Ok(())
         })
     }
@@ -360,7 +427,7 @@ impl MetadataDB {
     pub fn delete_local_data_item(&self, path: &RelativePath) -> Result<usize> {
         // Any operation involving consistency of sync-time stamps and/or parent-child relations
         // between items in the database requires a consistent view of the invariants held.
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
+        self.run_transaction(|| {
             // We insert an item, bump the data stores version and mark all events with the version.
             let local_data_store = self.get_local_data_store()?;
 
@@ -372,6 +439,8 @@ impl MetadataDB {
                 Ok(0)
             } else {
                 let deleted = self.delete_local_data_item_recursive(&mut path_items)?;
+
+                self.notify_change_for_optimization()?;
                 Ok(deleted)
             }
         })
@@ -385,7 +454,7 @@ impl MetadataDB {
     /// otherwise. For example, it never makes sense to update the full modification vector of an
     /// item, as this vector MUST be explicitly be generated from its child items.
     pub fn sync_local_data_item(&self, path: &RelativePath, target_item: &DBItem) -> Result<()> {
-        self.conn.transaction::<_, MetadataDBError, _>(|| {
+        self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
 
             // Look for existing items on this path.
@@ -421,18 +490,15 @@ impl MetadataDB {
 
                 // Remove un-needed entries for deleted items.
                 if target_item.is_deletion() {
-                    diesel::delete(mod_metadatas::table)
-                        .filter(mod_metadatas::id.eq(existing_item.item.id))
+                    diesel::delete(mod_metadatas::table.filter(mod_metadatas::id.eq(existing_item.item.id)))
                         .execute(&self.conn)?;
-                    diesel::delete(file_system_metadatas::table)
-                        .filter(file_system_metadatas::id.eq(existing_item.item.id))
+                    diesel::delete(file_system_metadatas::table.filter(file_system_metadatas::id.eq(existing_item.item.id)))
                         .execute(&self.conn)?;
                 }
 
                 // Everything is ready to simply be 'synced up' with the target item.
                 // This will also e.g. correctly setup the deletion status/folder status.
-                diesel::update(items::table)
-                    .filter(items::id.eq(existing_item.item.id))
+                diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
                     .set((
                         items::is_file.eq(target_item.is_file()),
                         items::is_deleted.eq(target_item.is_deletion()),
@@ -531,6 +597,7 @@ impl MetadataDB {
                 self.add_mod_event(&path_items, target_item.last_mod_store_id(), target_item.last_mod_store_time())?;
             }
 
+            self.notify_change_for_optimization()?;
             Ok(())
         })
     }
@@ -742,16 +809,8 @@ impl MetadataDB {
             return Ok(existing_path);
         }
 
-        let highest_id = path_components::table
-            .order(path_components::id.desc())
-            .limit(1)
-            .select(path_components::id)
-            .first::<i64>(&self.conn)
-            .optional()?;
-        let highest_id = highest_id.unwrap_or(0);
         diesel::insert_into(path_components::table)
             .values((
-                path_components::id.eq(highest_id + 1),
                 path_components::parent_id.eq(parent.map(|parent| parent.id)),
                 path_components::full_path.eq(&current_path_string),
             ))
@@ -787,15 +846,13 @@ impl MetadataDB {
         // Update Owner Info to be deleted
         if !path_items.last().unwrap().item.is_deleted {
             // Register the change in deletion_status
-            diesel::update(items::table)
-                .filter(items::id.eq(path_items.last().unwrap().item.id))
+            diesel::update(items::table.filter(items::id.eq(path_items.last().unwrap().item.id)))
                 .set(items::is_deleted.eq(true))
                 .execute(&self.conn)?;
 
             // Push the parent folders last mod time
-            self.increase_local_time()?;
+            let new_time = self.increase_local_time()?;
             let local_data_store = self.get_local_data_store()?;
-            let new_time = local_data_store.time;
 
             let current_item = path_items.pop().unwrap();
             self.add_mod_event(&path_items, local_data_store.id, new_time)?;
@@ -806,13 +863,17 @@ impl MetadataDB {
 
         // Remove un-needed entries
         // No need for modification times of deleted items.
-        diesel::delete(mod_metadatas::table)
-            .filter(mod_metadatas::id.eq(path_items.last().as_ref().unwrap().item.id))
-            .execute(&self.conn)?;
+        diesel::delete(
+            mod_metadatas::table
+                .filter(mod_metadatas::id.eq(path_items.last().as_ref().unwrap().item.id)),
+        )
+        .execute(&self.conn)?;
         // No need for metadata of deleted items.
-        diesel::delete(file_system_metadatas::table)
-            .filter(file_system_metadatas::id.eq(path_items.last().as_ref().unwrap().item.id))
-            .execute(&self.conn)?;
+        diesel::delete(
+            file_system_metadatas::table
+                .filter(file_system_metadatas::id.eq(path_items.last().as_ref().unwrap().item.id)),
+        )
+        .execute(&self.conn)?;
 
         Ok(deleted)
     }
@@ -827,10 +888,12 @@ impl MetadataDB {
             .filter(path_components::id.ne(parent_item.path_component.id))
             .select(path_components::id);
 
-        diesel::delete(items::table)
-            .filter(items::data_store_id.eq(parent_item.item.data_store_id))
-            .filter(items::path_component_id.eq_any(db_path_components))
-            .execute(&self.conn)?;
+        diesel::delete(
+            items::table
+                .filter(items::data_store_id.eq(parent_item.item.data_store_id))
+                .filter(items::path_component_id.eq_any(db_path_components)),
+        )
+        .execute(&self.conn)?;
 
         Ok(())
     }
@@ -920,7 +983,7 @@ impl MetadataDB {
     }
 
     fn clean_up_local_sync_times(&self) -> Result<usize> {
-        self.conn.transaction(|| {
+        self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
             let root_item = self
                 .load_data_items_on_path(&local_data_store, &RelativePath::from_path(""), true)?
@@ -1006,21 +1069,23 @@ impl MetadataDB {
         Ok(())
     }
 
-    /// Helper that increases the version of the local data store.
-    /// Frequently used when working with data items.
-    fn increase_local_time(&self) -> Result<()> {
-        diesel::update(data_stores::table)
-            .filter(data_stores::is_this_store.eq(true))
-            .set(data_stores::time.eq(data_stores::time + 1))
-            .execute(&self.conn)?;
-
-        Ok(())
-    }
-
     /// Upgrades the DB to the most recent schema version.
     fn upgrade_db(&self) -> db_migration::Result<()> {
         self.conn
             .transaction(|| db_migration::upgrade_db(&self.conn))?;
+
+        Ok(())
+    }
+
+    /// Notes that we did some updating operation, re-optimize the DB from time to time.
+    fn notify_change_for_optimization(&self) -> Result<()> {
+        let mut updates = self.updates_since_optimization.borrow_mut();
+        *updates += 1;
+
+        if *updates >= UPDATES_UNTIL_OPTIMIZATION {
+            *updates = 0;
+            sql_query("ANALYZE").execute(&self.conn)?;
+        }
 
         Ok(())
     }
@@ -1030,7 +1095,10 @@ impl MetadataDB {
         sql_query("PRAGMA locking_mode = EXCLUSIVE").execute(&self.conn)?;
         sql_query("PRAGMA journal_mode = WAL").execute(&self.conn)?;
         sql_query("PRAGMA foreign_keys = 1").execute(&self.conn)?;
-        sql_query("PRAGMA cache_size = -128000").execute(&self.conn)?;
+
+        // Set 'about' 512MB limit for RAM used to cache
+        sql_query("PRAGMA cache_size = -512000").execute(&self.conn)?;
+        sql_query("PRAGMA mmap_size = 536870912").execute(&self.conn)?;
 
         Ok(())
     }

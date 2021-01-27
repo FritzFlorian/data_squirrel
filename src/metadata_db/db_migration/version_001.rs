@@ -63,9 +63,9 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
 fn create_table_path_components(conn: &SqliteConnection) -> Result<()> {
     sql_query(
         "CREATE TABLE path_components(
-                id                  INTEGER NULL UNIQUE,  
+                id                  INTEGER PRIMARY KEY NOT NULL UNIQUE,  
                 parent_id           INTEGER,
-                full_path           TEXT PRIMARY KEY NOT NULL UNIQUE,
+                full_path           TEXT NOT NULL UNIQUE,
 
                 FOREIGN KEY(parent_id) REFERENCES path_components(id)
             )",
@@ -92,7 +92,7 @@ fn create_table_item(conn: &SqliteConnection) -> Result<()> {
                 is_file             INTEGER NOT NULL,
                 is_deleted          INTEGER NOT NULL,
 
-                UNIQUE(data_store_id, path_component_id),
+                UNIQUE(path_component_id, data_store_id),
                 FOREIGN KEY(data_store_id)      REFERENCES data_stores(id),
                 FOREIGN KEY(path_component_id)  REFERENCES path_components(id)
             )",

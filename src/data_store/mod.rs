@@ -782,49 +782,63 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         dir_path: &RelativePath,
         dir_metadata: &virtual_fs::Metadata,
     ) -> Result<ScanResult> {
-        // We keep track of 'scan events' to have a rough output on a run of the scan function.
+        // We keep track of 'scan events' to know how many items we scanned/where changed.
         let mut scan_result = ScanResult::new();
 
-        // Index the currently scanned dir (e.g. add it to the DB if it does not exist).
-        // (We exclude the root directory, as we never collect metadata on it).
-        if dir_path.get_path_components().len() > 1 {
-            let dir_scan_result = &self.index_dir(&dir_path, &dir_metadata)?;
-            scan_result = scan_result.combine(dir_scan_result);
-        }
+        // We also keep track of some items that we scan in this directory for later use.
+        let mut directories = Vec::new();
+        let mut lower_case_entries = HashSet::new();
 
-        // Next, we index each file present on disk in this directory.
+        // First, we index each file present on disk in this directory.
         // This is the 'positive' part of the scan operation, i.e. we add anything that is on
-        // disk and not in the DB, as well as anything that has changed on dis.
-        let items = self.fs_access.index(dir_path)?;
-        let mut lower_case_entries = HashSet::with_capacity(items.len());
-        for item in &items {
-            lower_case_entries.insert(item.relative_path.name().to_lowercase());
+        // disk and not in the DB, as well as anything that has changed on disk.
 
-            if item.issues.is_empty() {
-                let item_metadata = item.metadata.as_ref().unwrap();
-                match item_metadata.file_type() {
-                    virtual_fs::FileType::File => {
-                        let file_scan_result =
-                            self.index_file(&item.relative_path, &item_metadata, false)?;
-                        scan_result = scan_result.combine(&file_scan_result);
-                    }
-                    virtual_fs::FileType::Link => {
-                        // Todo: Properly collect un-handled links to the caller.
-                        eprintln!("Skipping Link {:?}...", item.relative_path);
-                    }
-                    virtual_fs::FileType::Dir => {
-                        let sub_dir_result =
-                            self.perform_scan(&item.relative_path, item_metadata)?;
-                        scan_result = scan_result.combine(&sub_dir_result);
-                    }
-                }
-            } else {
-                // TODO: Properly collect issues and report them to the caller.
-                eprintln!(
-                    "Issues with data item {:?}: {:?}",
-                    item.relative_path, item.issues
-                );
+        // 'Bundling' this into one DB transaction should speed things up.
+        self.db_access.run_bundled::<_, (), DataStoreError>(|| {
+            let items = self.fs_access.index(dir_path)?;
+
+            // (We exclude the root directory, as we never collect metadata on it)
+            if dir_path.get_path_components().len() > 1 {
+                let dir_scan_result = &self.index_dir(&dir_path, &dir_metadata)?;
+                scan_result = scan_result.combine(dir_scan_result);
             }
+
+            for item in items {
+                lower_case_entries.insert(item.relative_path.name().to_lowercase());
+
+                if item.issues.is_empty() {
+                    let item_metadata = item.metadata.as_ref().unwrap();
+                    match item_metadata.file_type() {
+                        virtual_fs::FileType::File => {
+                            let file_scan_result =
+                                self.index_file(&item.relative_path, &item_metadata, false)?;
+                            scan_result = scan_result.combine(&file_scan_result);
+                        }
+                        virtual_fs::FileType::Link => {
+                            // Todo: Properly collect un-handled links to the caller.
+                            eprintln!("Skipping Link {:?}...", item.relative_path);
+                        }
+                        virtual_fs::FileType::Dir => {
+                            directories.push(item);
+                        }
+                    }
+                } else {
+                    // TODO: Properly collect issues and report them to the caller.
+                    eprintln!(
+                        "Issues with data item {:?}: {:?}",
+                        item.relative_path, item.issues
+                    );
+                }
+            }
+
+            Ok(())
+        })??;
+        // We call the recursive scan for directories outside of the 'bundle' to keep transaction
+        // sizes bound. Testing shows that this keeps the WAL small and still bumps performance.
+        for directory in directories {
+            let sub_dir_result =
+                self.perform_scan(&directory.relative_path, &directory.metadata.unwrap())?;
+            scan_result = scan_result.combine(&sub_dir_result);
         }
 
         // Lastly we perform the 'negative' operation of the scan process:
