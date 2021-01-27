@@ -118,6 +118,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(self.db_access.get_local_data_store()?.human_name)
     }
 
+    pub fn optimize_database(&self) -> Result<()> {
+        self.db_access.clean_up()?;
+        Ok(())
+    }
+
     /// Re-indexes the data stored in this data_store.
     ///
     /// Traverses the data directory and performs the following actions for the metadata DB:

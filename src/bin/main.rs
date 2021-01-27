@@ -18,6 +18,9 @@ fn main() {
     let scan_cmd = SubCommand::with_name("scan")
         .about("performs a scan of the given data store, indexing any changed hard drive content");
 
+    let optimize_cmd = SubCommand::with_name("optimize")
+        .about("optimizes the underlying SQLite database (can save space and speed up operations)");
+
     let remote_path_arg = Arg::with_name("REMOTE_PATH")
         .required(true)
         .index(1)
@@ -38,6 +41,7 @@ fn main() {
         .subcommand(create_cmd)
         .subcommand(scan_cmd)
         .subcommand(sync_from_cmd)
+        .subcommand(optimize_cmd)
         .get_matches();
 
     let local_path = cli.value_of("LOCAL_PATH").unwrap();
@@ -47,6 +51,8 @@ fn main() {
         scan_data_store(&local_path, &scan_cli);
     } else if let Some(sync_from_cli) = cli.subcommand_matches("sync-from") {
         sync_from_remote(&local_path, &sync_from_cli);
+    } else if let Some(cleanup_cli) = cli.subcommand_matches("optimize") {
+        optimize_data_store(&local_path, &cleanup_cli);
     } else {
         println!("Please specify the command you want to perform on the data store.");
         println!("See --help for more information.");
@@ -94,4 +100,12 @@ fn sync_from_remote(local_path: &str, cmd_cli: &ArgMatches) {
         .sync_from_other_store(&remote_data_store, &RelativePath::from_path(""))
         .unwrap();
     println!("Sync Complete!");
+}
+
+fn optimize_data_store(local_path: &str, _cmd_cli: &ArgMatches) {
+    println!("Optimizing database file...");
+    let local_data_store =
+        core::data_store::DefaultDataStore::open(&PathBuf::from(local_path)).unwrap();
+    local_data_store.optimize_database().unwrap();
+    println!("Optimization done!");
 }
