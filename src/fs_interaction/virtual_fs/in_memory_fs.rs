@@ -283,15 +283,30 @@ impl FS for InMemoryFS {
             Err(io::Error::from(io::ErrorKind::NotFound))
         }
     }
-    fn write_file<P: AsRef<Path>>(
+    fn overwrite_file<'a, P: AsRef<Path>>(
         &self,
         path: P,
-        mut data: Box<dyn io::Read>,
+        mut data: Box<dyn io::Read + 'a>,
     ) -> io::Result<usize> {
         let path = self.canonicalize(path)?;
 
         if let Some(item) = self.items.borrow_mut().get_mut(&path) {
             item.data.clear();
+            let bytes_written = data.read_to_end(&mut item.data)?;
+            item.set_mod_time_now();
+            Ok(bytes_written)
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+    fn append_file<'a, P: AsRef<Path>>(
+        &self,
+        path: P,
+        mut data: Box<dyn io::Read + 'a>,
+    ) -> io::Result<usize> {
+        let path = self.canonicalize(path)?;
+
+        if let Some(item) = self.items.borrow_mut().get_mut(&path) {
             let bytes_written = data.read_to_end(&mut item.data)?;
             item.set_mod_time_now();
             Ok(bytes_written)

@@ -7,6 +7,10 @@ pub enum FSInteractionError {
     MetadataDirAlreadyExists,
     MetadataDirAlreadyOpened,
     SoftLinksForbidden,
+    // Issues when compiling ignore rules
+    IgnoreRuleError {
+        source: glob::PatternError,
+    },
     // IOError is simply our 'catch all' error type for 'non-special' issues
     IOError {
         source: io::Error,
@@ -17,33 +21,15 @@ pub type Result<T> = std::result::Result<T, FSInteractionError>;
 
 impl FSInteractionError {
     pub fn is_io_not_found(&self) -> bool {
-        match self {
-            Self::IOError {
-                kind: std::io::ErrorKind::NotFound,
-                ..
-            } => true,
-            _ => false,
-        }
+        matches!(self, Self::IOError {kind: std::io::ErrorKind::NotFound, ..} )
     }
 
     pub fn is_io_already_exists(&self) -> bool {
-        match self {
-            Self::IOError {
-                kind: std::io::ErrorKind::AlreadyExists,
-                ..
-            } => true,
-            _ => false,
-        }
+        matches!(self,Self::IOError {kind: std::io::ErrorKind::AlreadyExists, ..})
     }
 
     pub fn is_io_no_directory(&self) -> bool {
-        match self {
-            Self::IOError {
-                kind: std::io::ErrorKind::Other,
-                source: io_error,
-            } if io_error.raw_os_error() == Some(20) => true,
-            _ => false,
-        }
+        matches!(self, Self::IOError {kind: std::io::ErrorKind::Other, source: io_error} if io_error.raw_os_error() == Some(20))
     }
 }
 impl From<io::Error> for FSInteractionError {
@@ -52,6 +38,11 @@ impl From<io::Error> for FSInteractionError {
             kind: error.kind(),
             source: error,
         }
+    }
+}
+impl From<glob::PatternError> for FSInteractionError {
+    fn from(error: glob::PatternError) -> Self {
+        Self::IgnoreRuleError { source: error }
     }
 }
 impl fmt::Display for FSInteractionError {
@@ -63,6 +54,7 @@ impl Error for FSInteractionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::IOError { ref source, .. } => Some(source),
+            Self::IgnoreRuleError { ref source } => Some(source),
             Self::MetadataDirAlreadyExists => None,
             Self::SoftLinksForbidden => None,
             Self::MetadataDirAlreadyOpened => None,

@@ -127,23 +127,13 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
 
             // Create basic data_item for remaining, valid entries.
             let relative_path = relative_path.join(file_name.to_string());
+            let path_ignored = self.is_ignored(&relative_path);
             let mut data_item = DataItem {
                 relative_path: relative_path,
                 metadata: None,
                 issue: None,
+                ignored: path_ignored,
             };
-
-            // Check if any ignore rules match
-            if data_item.issue.is_none() {
-                let path_string = data_item.relative_path.get_path_components().join("/");
-                let is_ignored = self
-                    .ignore_rules
-                    .iter()
-                    .any(|rule| rule.matches(&path_string));
-                if is_ignored {
-                    data_item.issue = Some(Issue::Ignored);
-                }
-            }
 
             // Check if item is a duplicate (when ignoring case in names).
             if data_item.issue.is_none() {
@@ -299,7 +289,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
     ) -> Result<usize> {
         let absolute_path = self.root_path.join(&relative_path.to_path_buf());
 
-        Ok(self.fs.write_file(&absolute_path, data)?)
+        Ok(self.fs.overwrite_file(&absolute_path, data)?)
     }
 
     fn is_reserved_name(&self, file_name: &str) -> bool {
@@ -316,7 +306,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         Ok(())
     }
 
-    // Creates the file holding igonored file patterns
+    // Creates the file holding ignored file patterns.
     fn load_ignore_rules(&mut self) -> Result<()> {
         let result = self.fs.create_file(self.ignore_path());
         if result.is_err()
@@ -334,12 +324,31 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
                 continue;
             }
 
-            let glob_pattern =
-                glob::Pattern::new(&line).expect("Could not compile ignore-rules glob pattern!");
+            let glob_pattern = glob::Pattern::new(&line)?;
             self.ignore_rules.push(glob_pattern);
         }
 
         Ok(())
+    }
+
+    pub fn add_ignore_rule(&mut self, rule: &str, add_permanent: bool) -> Result<()> {
+        let glob_pattern = glob::Pattern::new(rule)?;
+
+        self.ignore_rules.push(glob_pattern);
+        if add_permanent {
+            let rule_line = format!("{:}\n", rule);
+            let rule_box = Box::new(rule_line.as_bytes());
+            self.fs.append_file(self.ignore_path(), rule_box)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn is_ignored(&self, path: &RelativePath) -> bool {
+        let path_string = path.get_path_components().join("/");
+        self.ignore_rules
+            .iter()
+            .any(|rule| rule.matches(&path_string))
     }
 
     // Creates the lock dot-file.
@@ -423,6 +432,7 @@ pub struct DataItem {
     pub relative_path: RelativePath,
     pub metadata: Option<virtual_fs::Metadata>,
     pub issue: Option<Issue>,
+    pub ignored: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -430,7 +440,6 @@ pub enum Issue {
     Duplicate,
     CanNotReadMetadata,
     SoftLinksForbidden,
-    Ignored,
     // Fixme: Add issue if we are not owner of the file.
 }
 

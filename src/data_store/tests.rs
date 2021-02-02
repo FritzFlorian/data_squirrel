@@ -152,6 +152,62 @@ fn scan_data_store_directory() {
     assert_eq!(data_store_1.local_time().unwrap(), 18);
 }
 
+#[test]
+fn exclude_ignored_files_during_scan() {
+    let in_memory_fs = virtual_fs::InMemoryFS::new();
+    let mut data_store_1 =
+        DataStore::create_with_fs("", "XYZ", "XYZ", "local-data-store", in_memory_fs.clone())
+            .unwrap();
+
+    // Initial data set
+    in_memory_fs.create_dir("sub-1", false).unwrap();
+    in_memory_fs.create_dir("sub-2", false).unwrap();
+    in_memory_fs.create_dir("sub-1/sub-3", false).unwrap();
+
+    in_memory_fs.create_file("file-1").unwrap();
+    in_memory_fs.create_file("file-2").unwrap();
+    in_memory_fs.create_file("sub-1/file-1").unwrap();
+    in_memory_fs.create_file("sub-1/sub-3/file-3").unwrap();
+
+    // Ignore just sub-3 for now.
+    data_store_1.add_scan_ignore_rule("**/sub-3", true).unwrap();
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 6, // Note that we do not even 'see' file-3
+            changed_items: 0,
+            new_items: 5, // Note that we ignore one of the scanned items
+            deleted_items: 0
+        }
+    );
+
+    // Detect we do not want to detect these changes, both should fall under the new ignore rules.
+    in_memory_fs
+        .test_increase_file_mod_time("sub-1/sub-3/file-3")
+        .unwrap();
+    in_memory_fs.create_file("sub-1/file-2").unwrap();
+    // This change on the other hand should be detected.
+    in_memory_fs.test_increase_file_mod_time("file-2").unwrap();
+
+    // NOTE: we do NOT EXPECT to remove existing indexed files. We just never want to add new ones
+    //       when we added them to the scan ignore rules.
+    //       Think of this a lot like git ignore files: once you staged files they wont go away.
+    data_store_1
+        .add_scan_ignore_rule("**/file-2", true)
+        .unwrap();
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 7, // We expect to 'see' the ignored file-2
+            changed_items: 1,
+            new_items: 0,
+            deleted_items: 0
+        }
+    );
+}
+
 fn dir_should_contain<FS: virtual_fs::FS>(fs: &FS, path: &str, expected_content: Vec<&str>) {
     let dir_entries = fs.list_dir(path).unwrap();
     for expected_item in expected_content {

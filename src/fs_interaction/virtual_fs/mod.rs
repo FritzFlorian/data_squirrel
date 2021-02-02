@@ -37,7 +37,16 @@ pub trait FS: Clone {
     ) -> io::Result<()>;
 
     fn read_file<P: AsRef<Path>>(&self, path: P) -> io::Result<Box<dyn io::Read>>;
-    fn write_file<P: AsRef<Path>>(&self, path: P, data: Box<dyn io::Read>) -> io::Result<usize>;
+    fn overwrite_file<'a, P: AsRef<Path>>(
+        &self,
+        path: P,
+        data: Box<dyn io::Read + 'a>,
+    ) -> io::Result<usize>;
+    fn append_file<'a, P: AsRef<Path>>(
+        &self,
+        path: P,
+        data: Box<dyn io::Read + 'a>,
+    ) -> io::Result<usize>;
     fn db_access_type(&self) -> DBAccessType;
 }
 

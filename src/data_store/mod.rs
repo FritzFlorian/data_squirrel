@@ -16,6 +16,7 @@ mod scan_result;
 pub use self::scan_result::ScanResult;
 mod errors;
 pub use self::errors::*;
+use fs_interaction::DataItem;
 use metadata_db::DBItem;
 
 pub struct DataStore<FS: virtual_fs::FS> {
@@ -118,8 +119,17 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(self.db_access.get_local_data_store()?.human_name)
     }
 
+    // Tries to optimize the database file.
+    // This generally shrinks its size and slightly improves performance.
     pub fn optimize_database(&self) -> Result<()> {
         self.db_access.clean_up()?;
+        Ok(())
+    }
+
+    // Adds a glob rule to the ignored files during a normal file system scan.
+    pub fn add_scan_ignore_rule(&mut self, rule: &str, persist_rule: bool) -> Result<()> {
+        self.fs_access.add_ignore_rule(rule, persist_rule)?;
+
         Ok(())
     }
 
@@ -137,7 +147,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let root_path = RelativePath::from_path("");
         let root_metadata = self.fs_access.metadata(&root_path)?;
 
-        self.perform_scan(&root_path, &root_metadata)
+        let root_data_item = DataItem {
+            relative_path: root_path,
+            metadata: Some(root_metadata),
+            issue: None,
+            ignored: false,
+        };
+
+        self.perform_scan(&root_data_item)
     }
 
     /// Includes the data stores given into the local database and returns a list of all
@@ -665,28 +682,31 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(true)
     }
 
-    fn index_dir(
-        &self,
-        path: &RelativePath,
-        metadata: &virtual_fs::Metadata,
-    ) -> Result<ScanResult> {
+    fn index_dir(&self, dir: &mut DataItem) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
-        let dir_creation_time = Self::fs_to_date_time(&metadata.creation_time());
-        let dir_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
-        let is_read_only = metadata.read_only();
+        let dir_creation_time =
+            Self::fs_to_date_time(&dir.metadata.as_ref().unwrap().creation_time());
+        let dir_mod_time = Self::fs_to_date_time(&dir.metadata.as_ref().unwrap().last_mod_time());
+        let is_read_only = dir.metadata.as_ref().unwrap().read_only();
 
-        let db_item = self.db_access.get_local_data_item(&path, false)?;
+        let db_item = self
+            .db_access
+            .get_local_data_item(&dir.relative_path, false)?;
         match db_item.content {
             metadata_db::ItemType::FILE { .. } => {
+                // We never ignore items if we already have DB entries.
+                dir.ignored = false;
+
                 // Delete existing file
                 result.deleted_items += 1;
-                self.db_access.delete_local_data_item(&path)?;
+                self.db_access.delete_local_data_item(&dir.relative_path)?;
+
                 // Create new dir entry
                 result.new_items += 1;
                 self.db_access.update_local_data_item(
-                    &path,
+                    &dir.relative_path,
                     dir_creation_time,
                     dir_mod_time,
                     false,
@@ -695,14 +715,17 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 )?;
             }
             metadata_db::ItemType::FOLDER { metadata, .. } => {
+                // We never ignore items if we already have DB entries.
+                dir.ignored = false;
+
                 // Simply update the relevant metadata if it is out of sync.
                 if metadata.mod_time != dir_mod_time
-                    || metadata.case_sensitive_name != path.name()
+                    || metadata.case_sensitive_name != dir.relative_path.name()
                     || metadata.is_read_only != is_read_only
                 {
                     result.changed_items += 1;
                     self.db_access.update_local_data_item(
-                        &path,
+                        &dir.relative_path,
                         dir_creation_time,
                         dir_mod_time,
                         false,
@@ -712,56 +735,63 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }
             }
             metadata_db::ItemType::DELETION { .. } => {
-                // Create new dir entry
-                result.new_items += 1;
-                self.db_access.update_local_data_item(
-                    &path,
-                    dir_creation_time,
-                    dir_mod_time,
-                    false,
-                    "",
-                    is_read_only,
-                )?;
+                if dir.ignored {
+                    // FIXME: Properly add ignore status to DB.
+                    eprintln!("Ignore Item: {:?}", &dir.relative_path);
+                } else {
+                    // Create new dir entry
+                    result.new_items += 1;
+                    self.db_access.update_local_data_item(
+                        &dir.relative_path,
+                        dir_creation_time,
+                        dir_mod_time,
+                        false,
+                        "",
+                        is_read_only,
+                    )?;
+                }
             }
         }
 
         Ok(result)
     }
 
-    fn index_file(
-        &self,
-        path: &RelativePath,
-        metadata: &virtual_fs::Metadata,
-        detect_bitrot: bool,
-    ) -> Result<ScanResult> {
+    fn index_file(&self, file: &mut DataItem, detect_bitrot: bool) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
-        let file_creation_time = Self::fs_to_date_time(&metadata.creation_time());
-        let file_mod_time = Self::fs_to_date_time(&metadata.last_mod_time());
-        let is_read_only = metadata.read_only();
+        let db_item = self
+            .db_access
+            .get_local_data_item(&file.relative_path, false)?;
 
-        let db_item = self.db_access.get_local_data_item(path, false)?;
+        let file_creation_time =
+            Self::fs_to_date_time(&file.metadata.as_ref().unwrap().creation_time());
+        let file_mod_time = Self::fs_to_date_time(&file.metadata.as_ref().unwrap().last_mod_time());
+        let file_is_read_only = file.metadata.as_ref().unwrap().read_only();
+
         match db_item.content {
             metadata_db::ItemType::FILE { metadata, .. } => {
+                // We never ignore items if we already have DB entries.
+                file.ignored = false;
+
                 // We got an existing entry, see if it requires updating.
                 if metadata.mod_time != file_mod_time
-                    || metadata.case_sensitive_name != path.name()
-                    || metadata.is_read_only != is_read_only
+                    || metadata.case_sensitive_name != file.relative_path.name()
+                    || metadata.is_read_only != file_is_read_only
                 {
                     result.changed_items += 1;
 
-                    let hash = self.fs_access.calculate_hash(&path)?;
+                    let hash = self.fs_access.calculate_hash(&file.relative_path)?;
                     self.db_access.update_local_data_item(
-                        &path,
+                        &file.relative_path,
                         file_creation_time,
                         file_mod_time,
                         true,
                         &hash,
-                        is_read_only,
+                        file_is_read_only,
                     )?;
                 } else if detect_bitrot {
-                    let hash = self.fs_access.calculate_hash(&path)?;
+                    let hash = self.fs_access.calculate_hash(&file.relative_path)?;
 
                     if metadata.hash != hash {
                         // TODO: properly handle this by returning errors. Maybe re-trying to hash
@@ -771,98 +801,116 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }
             }
             metadata_db::ItemType::FOLDER { .. } => {
+                // We never ignore items if we already have DB entries.
+                file.ignored = false;
+
                 // FIXME: Handle if a folder is changed to be a file.
                 panic!("Changing folders to files is not supported!");
             }
             metadata_db::ItemType::DELETION { .. } => {
-                // We have no local entry for the target file in our DB, register it as a new file.
-                result.new_items += 1;
+                if file.ignored {
+                    // FIXME: Properly add ignore status to DB.
+                    eprintln!("Ignore Item: {:?}", &file.relative_path);
+                } else {
+                    // We have no local entry for the target file in our DB, register it as a new file.
+                    result.new_items += 1;
 
-                let hash = self.fs_access.calculate_hash(&path)?;
-                self.db_access.update_local_data_item(
-                    &path,
-                    file_creation_time,
-                    file_mod_time,
-                    true,
-                    &hash,
-                    false,
-                )?;
+                    let hash = self.fs_access.calculate_hash(&file.relative_path)?;
+                    self.db_access.update_local_data_item(
+                        &file.relative_path,
+                        file_creation_time,
+                        file_mod_time,
+                        true,
+                        &hash,
+                        false,
+                    )?;
+                }
             }
         }
 
         Ok(result)
     }
 
-    fn perform_scan(
-        &self,
-        dir_path: &RelativePath,
-        dir_metadata: &virtual_fs::Metadata,
-    ) -> Result<ScanResult> {
+    fn perform_scan(&self, dir_item: &DataItem) -> Result<ScanResult> {
         // We keep track of 'scan events' to know how many items we scanned/where changed.
         let mut scan_result = ScanResult::new();
-
-        // We also keep track of some items that we scan in this directory for later use.
-        let mut directories = Vec::new();
-        let mut lower_case_entries = HashSet::new();
 
         // First, we index each file present on disk in this directory.
         // This is the 'positive' part of the scan operation, i.e. we add anything that is on
         // disk and not in the DB, as well as anything that has changed on disk.
+        let items = self.fs_access.index(&dir_item.relative_path)?;
 
-        // 'Bundling' this into one DB transaction should speed things up.
+        // Partition items into groups for further processing.
+        let mut issues = Vec::with_capacity(items.len());
+        let mut directories = Vec::with_capacity(items.len());
+        let mut sym_links = Vec::with_capacity(items.len());
+        let mut files = Vec::with_capacity(items.len());
+
+        let mut lower_case_names = HashSet::new();
+
+        for item in items {
+            lower_case_names.insert(item.relative_path.name().to_lowercase());
+
+            if item.ignored {}
+
+            if item.issue.is_none() {
+                let item_metadata = item.metadata.as_ref().unwrap();
+                match item_metadata.file_type() {
+                    virtual_fs::FileType::File => files.push(item),
+                    virtual_fs::FileType::Link => sym_links.push(item),
+                    virtual_fs::FileType::Dir => directories.push(item),
+                }
+            } else {
+                issues.push(item);
+            }
+        }
+
+        // Process all content of this directory in one big DB transaction.
+        // (this gives some performance without adding a more complex cache for the SQLite DB).
         self.db_access.run_bundled::<_, (), DataStoreError>(|| {
-            let items = self.fs_access.index(dir_path)?;
-
-            // (We exclude the root directory, as we never collect metadata on it)
-            if dir_path.get_path_components().len() > 1 {
-                let dir_scan_result = &self.index_dir(&dir_path, &dir_metadata)?;
-                scan_result = scan_result.combine(dir_scan_result);
+            for mut sub_dir_item in &mut directories {
+                let sub_dir_result = self.index_dir(&mut sub_dir_item)?;
+                scan_result = scan_result.combine(&sub_dir_result);
             }
 
-            for item in items {
-                lower_case_entries.insert(item.relative_path.name().to_lowercase());
-
-                if item.issue.is_none() {
-                    let item_metadata = item.metadata.as_ref().unwrap();
-                    match item_metadata.file_type() {
-                        virtual_fs::FileType::File => {
-                            let file_scan_result =
-                                self.index_file(&item.relative_path, &item_metadata, false)?;
-                            scan_result = scan_result.combine(&file_scan_result);
-                        }
-                        virtual_fs::FileType::Link => {
-                            // Todo: Properly collect un-handled links to the caller.
-                            eprintln!("Skipping Link {:?}...", item.relative_path);
-                        }
-                        virtual_fs::FileType::Dir => {
-                            directories.push(item);
-                        }
-                    }
-                } else {
-                    // TODO: Properly collect issues and report them to the caller.
-                    eprintln!(
-                        "Issues with data item {:?}: {:?}",
-                        item.relative_path, item.issue
-                    );
-                }
+            for mut file_item in &mut files {
+                let file_scan_result = self.index_file(&mut file_item, false)?;
+                scan_result = scan_result.combine(&file_scan_result);
             }
 
             Ok(())
         })??;
-        // We call the recursive scan for directories outside of the 'bundle' to keep transaction
-        // sizes bound. Testing shows that this keeps the WAL small and still bumps performance.
-        for directory in directories {
-            let sub_dir_result =
-                self.perform_scan(&directory.relative_path, &directory.metadata.unwrap())?;
-            scan_result = scan_result.combine(&sub_dir_result);
+
+        // Process recursive directories NOT in one big transaction
+        // (this would blow the transaction size to be a WHOLE indexing run, hurting performance).
+        for sub_dir_item in &directories {
+            if !sub_dir_item.ignored {
+                let sub_dir_result = self.perform_scan(&sub_dir_item)?;
+                scan_result = scan_result.combine(&sub_dir_result);
+            }
+        }
+
+        // Report any issues detected in the fs layer or if we found sym links.
+        for sym_link_item in &sym_links {
+            // Todo: Properly collect un-handled links to the caller.
+            eprintln!("Skipping Link {:?}...", sym_link_item.relative_path);
+        }
+        for issue_item in &issues {
+            // TODO: Properly collect issues and report them to the caller.
+            eprintln!(
+                "Issues with data item {:?}: {:?}",
+                issue_item.relative_path, issue_item.issue
+            );
         }
 
         // Lastly we perform the 'negative' operation of the scan process:
         // We load all known entries of the directory and see if there are any that are
         // no longer present on disk, thus signaling a deletion.
-        let child_items = self.db_access.get_local_child_items(&dir_path, false)?;
+        let child_items = self
+            .db_access
+            .get_local_child_items(&dir_item.relative_path, false)?;
         for child_item in child_items.iter() {
-            if !lower_case_entries.contains(&child_item.path.name().to_lowercase()) {
+            if !lower_case_names.contains(&child_item.path.name().to_lowercase()) {
                 let child_item_path = child_item.path.clone();
                 scan_result.deleted_items +=
                     self.db_access.delete_local_data_item(&child_item_path)?;

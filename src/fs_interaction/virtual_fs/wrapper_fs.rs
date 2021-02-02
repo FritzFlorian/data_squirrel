@@ -105,12 +105,33 @@ impl FS for WrapperFS {
 
         Ok(Box::new(reader))
     }
-    fn write_file<P: AsRef<Path>>(&self, path: P, data: Box<dyn io::Read>) -> io::Result<usize> {
+    fn overwrite_file<'a, P: AsRef<Path>>(
+        &self,
+        path: P,
+        data: Box<dyn io::Read + 'a>,
+    ) -> io::Result<usize> {
         let mut writer = fs::OpenOptions::new()
             .create(false)
             .read(false)
             .write(true)
             .truncate(true)
+            .open(path.as_ref())?;
+
+        let mut buffered_data = BufReader::new(data);
+        let bytes_written = std::io::copy(&mut buffered_data, &mut writer)?;
+
+        Ok(bytes_written as usize)
+    }
+    fn append_file<'a, P: AsRef<Path>>(
+        &self,
+        path: P,
+        data: Box<dyn io::Read + 'a>,
+    ) -> io::Result<usize> {
+        let mut writer = fs::OpenOptions::new()
+            .create(false)
+            .read(false)
+            .write(true)
+            .append(true)
             .open(path.as_ref())?;
 
         let mut buffered_data = BufReader::new(data);
