@@ -17,7 +17,7 @@ pub use self::scan_result::ScanResult;
 mod errors;
 pub use self::errors::*;
 use fs_interaction::DataItem;
-use metadata_db::DBItem;
+use metadata_db::{DBItem, ItemFSMetadata};
 
 pub struct DataStore<FS: virtual_fs::FS> {
     fs_access: FSInteraction<FS>,
@@ -682,148 +682,100 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(true)
     }
 
-    fn index_dir(&self, dir: &mut DataItem) -> Result<ScanResult> {
-        let mut result = ScanResult::new();
-        result.indexed_items += 1;
+    fn has_metadata_changed(db_metadata: &ItemFSMetadata, fs_item: &DataItem) -> bool {
+        let fs_mod_time =
+            Self::fs_to_date_time(&fs_item.metadata.as_ref().unwrap().last_mod_time());
+        let fs_metadata = fs_item.metadata.as_ref().unwrap();
 
-        let dir_creation_time =
-            Self::fs_to_date_time(&dir.metadata.as_ref().unwrap().creation_time());
-        let dir_mod_time = Self::fs_to_date_time(&dir.metadata.as_ref().unwrap().last_mod_time());
-        let is_read_only = dir.metadata.as_ref().unwrap().read_only();
-
-        let db_item = self
-            .db_access
-            .get_local_data_item(&dir.relative_path, false)?;
-        match db_item.content {
-            metadata_db::ItemType::FILE { .. } => {
-                // We never ignore items if we already have DB entries.
-                dir.ignored = false;
-
-                // Delete existing file
-                result.deleted_items += 1;
-                self.db_access.delete_local_data_item(&dir.relative_path)?;
-
-                // Create new dir entry
-                result.new_items += 1;
-                self.db_access.update_local_data_item(
-                    &dir.relative_path,
-                    dir_creation_time,
-                    dir_mod_time,
-                    false,
-                    "",
-                    is_read_only,
-                )?;
-            }
-            metadata_db::ItemType::FOLDER { metadata, .. } => {
-                // We never ignore items if we already have DB entries.
-                dir.ignored = false;
-
-                // Simply update the relevant metadata if it is out of sync.
-                if metadata.mod_time != dir_mod_time
-                    || metadata.case_sensitive_name != dir.relative_path.name()
-                    || metadata.is_read_only != is_read_only
-                {
-                    result.changed_items += 1;
-                    self.db_access.update_local_data_item(
-                        &dir.relative_path,
-                        dir_creation_time,
-                        dir_mod_time,
-                        false,
-                        "",
-                        is_read_only,
-                    )?;
-                }
-            }
-            metadata_db::ItemType::DELETION { .. } => {
-                if dir.ignored {
-                    // FIXME: Properly add ignore status to DB.
-                    eprintln!("Ignore Item: {:?}", &dir.relative_path);
-                } else {
-                    // Create new dir entry
-                    result.new_items += 1;
-                    self.db_access.update_local_data_item(
-                        &dir.relative_path,
-                        dir_creation_time,
-                        dir_mod_time,
-                        false,
-                        "",
-                        is_read_only,
-                    )?;
-                }
-            }
-        }
-
-        Ok(result)
+        db_metadata.mod_time != fs_mod_time
+            || db_metadata.case_sensitive_name != fs_item.relative_path.name()
+            || db_metadata.is_read_only != fs_metadata.read_only()
     }
 
-    fn index_file(&self, file: &mut DataItem, detect_bitrot: bool) -> Result<ScanResult> {
+    fn update_db_item(&self, fs_item: &DataItem, hash: &str) -> Result<()> {
+        let fs_creation_time =
+            Self::fs_to_date_time(&fs_item.metadata.as_ref().unwrap().creation_time());
+        let fs_mod_time =
+            Self::fs_to_date_time(&fs_item.metadata.as_ref().unwrap().last_mod_time());
+        let fs_metadata = fs_item.metadata.as_ref().unwrap();
+
+        self.db_access.update_local_data_item(
+            &fs_item.relative_path,
+            fs_creation_time,
+            fs_mod_time,
+            fs_metadata.is_file(),
+            &hash,
+            fs_metadata.read_only(),
+        )?;
+
+        Ok(())
+    }
+
+    fn index_item(&self, fs_item: &mut DataItem, detect_bitrot: bool) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         result.indexed_items += 1;
 
         let db_item = self
             .db_access
-            .get_local_data_item(&file.relative_path, false)?;
-
-        let file_creation_time =
-            Self::fs_to_date_time(&file.metadata.as_ref().unwrap().creation_time());
-        let file_mod_time = Self::fs_to_date_time(&file.metadata.as_ref().unwrap().last_mod_time());
-        let file_is_read_only = file.metadata.as_ref().unwrap().read_only();
+            .get_local_data_item(&fs_item.relative_path, false)?;
 
         match db_item.content {
             metadata_db::ItemType::FILE { metadata, .. } => {
                 // We never ignore items if we already have DB entries.
-                file.ignored = false;
+                fs_item.ignored = false;
 
-                // We got an existing entry, see if it requires updating.
-                if metadata.mod_time != file_mod_time
-                    || metadata.case_sensitive_name != file.relative_path.name()
-                    || metadata.is_read_only != file_is_read_only
-                {
-                    result.changed_items += 1;
-
-                    let hash = self.fs_access.calculate_hash(&file.relative_path)?;
-                    self.db_access.update_local_data_item(
-                        &file.relative_path,
-                        file_creation_time,
-                        file_mod_time,
-                        true,
-                        &hash,
-                        file_is_read_only,
-                    )?;
-                } else if detect_bitrot {
-                    let hash = self.fs_access.calculate_hash(&file.relative_path)?;
-
-                    if metadata.hash != hash {
-                        // TODO: properly handle this by returning errors. Maybe re-trying to hash
-                        //       the file in case this was simply a read issue.
-                        panic!("Bitrot detected!")
+                if fs_item.metadata.as_ref().unwrap().is_file() {
+                    if Self::has_metadata_changed(&metadata, &fs_item) {
+                        result.changed_items += 1;
+                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                        self.update_db_item(&fs_item, &hash)?;
+                    } else if detect_bitrot {
+                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                        if metadata.hash != hash {
+                            // TODO: properly handle this by returning errors.
+                            panic!("Bitrot detected!")
+                        }
                     }
+                } else {
+                    // Delete the existing file db entry...
+                    result.deleted_items += 1;
+                    self.db_access
+                        .delete_local_data_item(&fs_item.relative_path)?;
+                    // ... replace it with a directory.
+                    result.new_items += 1;
+                    self.update_db_item(&fs_item, "")?;
                 }
             }
-            metadata_db::ItemType::FOLDER { .. } => {
+            metadata_db::ItemType::FOLDER { metadata, .. } => {
                 // We never ignore items if we already have DB entries.
-                file.ignored = false;
+                fs_item.ignored = false;
 
-                // FIXME: Handle if a folder is changed to be a file.
-                panic!("Changing folders to files is not supported!");
+                if fs_item.metadata.as_ref().unwrap().is_file() {
+                    // Delete existing directory db entry ...
+                    result.deleted_items += self
+                        .db_access
+                        .delete_local_data_item(&fs_item.relative_path)?;
+                    // ...replace it with a file entry.
+                    result.new_items += 1;
+                    self.update_db_item(&fs_item, "")?;
+                } else if Self::has_metadata_changed(&metadata, &fs_item) {
+                    result.changed_items += 1;
+                    self.update_db_item(&fs_item, "")?;
+                }
             }
             metadata_db::ItemType::DELETION { .. } => {
-                if file.ignored {
+                if fs_item.ignored {
                     // FIXME: Properly add ignore status to DB.
-                    eprintln!("Ignore Item: {:?}", &file.relative_path);
+                    eprintln!("Ignore Item: {:?}", &fs_item.relative_path);
                 } else {
-                    // We have no local entry for the target file in our DB, register it as a new file.
+                    // We have no local entry for the target file/dir in our DB.
                     result.new_items += 1;
-
-                    let hash = self.fs_access.calculate_hash(&file.relative_path)?;
-                    self.db_access.update_local_data_item(
-                        &file.relative_path,
-                        file_creation_time,
-                        file_mod_time,
-                        true,
-                        &hash,
-                        false,
-                    )?;
+                    if fs_item.metadata.as_ref().unwrap().is_file() {
+                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                        self.update_db_item(&fs_item, &hash)?;
+                    } else {
+                        self.update_db_item(&fs_item, "")?;
+                    }
                 }
             }
         }
@@ -840,67 +792,38 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // disk and not in the DB, as well as anything that has changed on disk.
         let items = self.fs_access.index(&dir_item.relative_path)?;
 
-        // Partition items into groups for further processing.
-        let mut issues = Vec::with_capacity(items.len());
-        let mut directories = Vec::with_capacity(items.len());
-        let mut sym_links = Vec::with_capacity(items.len());
-        let mut files = Vec::with_capacity(items.len());
-
         let mut lower_case_names = HashSet::new();
-
-        for item in items {
+        for mut item in items {
             lower_case_names.insert(item.relative_path.name().to_lowercase());
-
-            if item.ignored {}
 
             if item.issue.is_none() {
                 let item_metadata = item.metadata.as_ref().unwrap();
                 match item_metadata.file_type() {
-                    virtual_fs::FileType::File => files.push(item),
-                    virtual_fs::FileType::Link => sym_links.push(item),
-                    virtual_fs::FileType::Dir => directories.push(item),
+                    virtual_fs::FileType::File => {
+                        let file_scan_result = self.index_item(&mut item, false)?;
+                        scan_result = scan_result.combine(&file_scan_result);
+                    }
+                    virtual_fs::FileType::Dir => {
+                        let dir_scan_result = self.index_item(&mut item, false)?;
+                        scan_result = scan_result.combine(&dir_scan_result);
+
+                        if !item.ignored {
+                            let recursive_result = self.perform_scan(&mut item)?;
+                            scan_result = scan_result.combine(&recursive_result);
+                        }
+                    }
+                    virtual_fs::FileType::Link => {
+                        // Todo: Properly collect un-handled links to the caller.
+                        eprintln!("Skipping Link {:?}...", item.relative_path);
+                    }
                 }
             } else {
-                issues.push(item);
+                // TODO: Properly collect issues and report them to the caller.
+                eprintln!(
+                    "Issues with data item {:?}: {:?}",
+                    item.relative_path, item.issue
+                );
             }
-        }
-
-        // Process all content of this directory in one big DB transaction.
-        // (this gives some performance without adding a more complex cache for the SQLite DB).
-        self.db_access.run_bundled::<_, (), DataStoreError>(|| {
-            for mut sub_dir_item in &mut directories {
-                let sub_dir_result = self.index_dir(&mut sub_dir_item)?;
-                scan_result = scan_result.combine(&sub_dir_result);
-            }
-
-            for mut file_item in &mut files {
-                let file_scan_result = self.index_file(&mut file_item, false)?;
-                scan_result = scan_result.combine(&file_scan_result);
-            }
-
-            Ok(())
-        })??;
-
-        // Process recursive directories NOT in one big transaction
-        // (this would blow the transaction size to be a WHOLE indexing run, hurting performance).
-        for sub_dir_item in &directories {
-            if !sub_dir_item.ignored {
-                let sub_dir_result = self.perform_scan(&sub_dir_item)?;
-                scan_result = scan_result.combine(&sub_dir_result);
-            }
-        }
-
-        // Report any issues detected in the fs layer or if we found sym links.
-        for sym_link_item in &sym_links {
-            // Todo: Properly collect un-handled links to the caller.
-            eprintln!("Skipping Link {:?}...", sym_link_item.relative_path);
-        }
-        for issue_item in &issues {
-            // TODO: Properly collect issues and report them to the caller.
-            eprintln!(
-                "Issues with data item {:?}: {:?}",
-                issue_item.relative_path, issue_item.issue
-            );
         }
 
         // Lastly we perform the 'negative' operation of the scan process:
