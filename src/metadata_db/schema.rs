@@ -37,8 +37,7 @@ table! {
         data_store_id -> BigInt,
         path_component_id -> BigInt,
 
-        is_file -> Bool,
-        is_deleted -> Bool,
+        file_type -> Integer,
     }
 }
 

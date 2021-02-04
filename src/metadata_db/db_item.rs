@@ -4,6 +4,7 @@ use super::ModMetadata;
 use super::PathComponent;
 
 use fs_interaction::relative_path::RelativePath;
+use metadata_db::FileType;
 use version_vector::VersionVector;
 
 /// DB-Internal representation of an entry loaded from the DB.
@@ -77,7 +78,7 @@ pub struct ItemFSMetadata {
 
 impl DBItem {
     pub fn from_internal_item(parent_items: &Vec<DBItemInternal>, item: DBItemInternal) -> Self {
-        let (item_type, file_name) = if item.item.is_deleted {
+        let (item_type, file_name) = if item.item.file_type == FileType::DELETED {
             (
                 ItemType::DELETION,
                 RelativePath::from_path(item.path_component.full_path)
@@ -96,7 +97,7 @@ impl DBItem {
 
             let metadata = Self::internal_to_external_metadata(item.fs_metadata.unwrap());
             let file_name = metadata.case_sensitive_name.clone();
-            if item.item.is_file {
+            if item.item.file_type == FileType::FILE {
                 (
                     ItemType::FILE {
                         metadata: metadata,
@@ -148,6 +149,14 @@ impl DBItem {
             hash: metadata.hash,
 
             is_read_only: metadata.is_read_only,
+        }
+    }
+
+    pub fn file_type(&self) -> FileType {
+        match &self.content {
+            ItemType::FILE { .. } => FileType::FILE,
+            ItemType::FOLDER { .. } => FileType::DIRECTORY,
+            ItemType::DELETION { .. } => FileType::DELETED,
         }
     }
 

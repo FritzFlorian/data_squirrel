@@ -17,3 +17,5 @@ pub mod mod_time;
 pub use self::mod_time::ModTime;
 pub mod sync_time;
 pub use self::sync_time::SyncTime;
+pub mod file_type_enum;
+pub use self::file_type_enum::FileType;

@@ -320,19 +320,20 @@ impl MetadataDB {
             let (parent_dir_item, existing_item) =
                 Self::extract_parent_dir_and_item(&path_items, path.path_component_number())?;
 
-            if parent_dir_item.item.is_file {
+            if parent_dir_item.item.file_type == FileType::FILE{
                 return Err(MetadataDBError::ViolatesDBConsistency {
                     message: "Must not insert data_item that has a file as a parent!"
                 });
             }
-            if parent_dir_item.item.is_deleted {
+            if parent_dir_item.item.file_type == FileType::DELETED {
                 return Err(MetadataDBError::ViolatesDBConsistency {
                     message: "Must not try to modify a local item that has a deleted parent folder!"
                 })
             }
 
             let (path_component, item) = if let Some(existing_item) = existing_item {
-                if !existing_item.item.is_deleted && existing_item.item.is_file != is_file {
+                if (is_file && existing_item.item.file_type == FileType::DIRECTORY) ||
+                    (!is_file && existing_item.item.file_type == FileType::FILE) {
                     return Err(MetadataDBError::ViolatesDBConsistency {
                         message: "Must not change types of entries in the DB. Delete and re-create them instead!",
                     })
@@ -340,15 +341,13 @@ impl MetadataDB {
 
                 // ...update it to reflect the change.
                 diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
-                    .set((
-                        items::is_deleted.eq(false),
-                        items::is_file.eq(is_file)
-                    ))
+                    .set(
+                        items::file_type.eq(if is_file { FileType::FILE } else { FileType::DIRECTORY })
+                    )
                     .execute(&self.conn)?;
-                let mut item = existing_item.item.clone();
 
-                item.is_deleted = false;
-                item.is_file = is_file;
+                let mut item = existing_item.item.clone();
+                item.file_type = if is_file { FileType::FILE } else { FileType::DIRECTORY };
 
                 (existing_item.path_component.clone(), item)
             } else {
@@ -360,8 +359,7 @@ impl MetadataDB {
                         path_component_id: path_component.id,
                         data_store_id: local_data_store.id,
 
-                        is_file: is_file,
-                        is_deleted: false,
+                        file_type: if is_file { FileType::FILE } else { FileType::DIRECTORY },
                     })
                     .execute(&self.conn)?;
 
@@ -470,12 +468,12 @@ impl MetadataDB {
             let (parent_dir_item, existing_item) =
                 Self::extract_parent_dir_and_item(&path_items, path.path_component_number())?;
 
-            if parent_dir_item.item.is_deleted {
+            if parent_dir_item.item.file_type == FileType::DELETED {
                 return Err(MetadataDBError::ViolatesDBConsistency {
                     message: "Must not insert data_item below an deleted db entry (i.e. no file without an existing parent folder)!"
                 });
             }
-            if parent_dir_item.item.is_file {
+            if parent_dir_item.item.file_type == FileType::FILE {
                 return Err(MetadataDBError::ViolatesDBConsistency {
                     message: "Must not insert data_item that has a file as a parent!"
                 });
@@ -484,8 +482,8 @@ impl MetadataDB {
             // Associate item with the path (...or update an existing one, e.g.
             // for a previously deleted item that still requires a deletion notice in the DB).
             let (path_component, item) = if let Some(existing_item) = existing_item {
-                let item_will_be_deleted = !existing_item.item.is_deleted && target_item.is_deletion();
-                let item_no_longer_folder = !existing_item.item.is_file && !target_item.is_folder();
+                let item_will_be_deleted = existing_item.item.file_type != FileType::DELETED && target_item.is_deletion();
+                let item_no_longer_folder = existing_item.item.file_type == FileType::DIRECTORY && target_item.is_file();
 
                 if  item_will_be_deleted || item_no_longer_folder {
                     // In case a previous folder now is none-anymore, we need to clean out
@@ -505,13 +503,11 @@ impl MetadataDB {
                 // This will also e.g. correctly setup the deletion status/folder status.
                 diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
                     .set((
-                        items::is_file.eq(target_item.is_file()),
-                        items::is_deleted.eq(target_item.is_deletion()),
+                        items::file_type.eq(target_item.file_type()),
                     )).execute(&self.conn)?;
 
                 let mut item = existing_item.item.clone();
-                item.is_file = target_item.is_file();
-                item.is_deleted = target_item.is_deletion();
+                item.file_type = target_item.file_type();
 
                 (existing_item.path_component.clone(), item)
             } else {
@@ -524,8 +520,7 @@ impl MetadataDB {
                         path_component_id: path_component.id,
                         data_store_id: local_data_store.id,
 
-                        is_file: target_item.is_file(),
-                        is_deleted: target_item.is_deletion(),
+                        file_type: target_item.file_type(),
                     })
                     .execute(&self.conn)?;
 
@@ -553,7 +548,7 @@ impl MetadataDB {
 
                 // Mod Metadata is tricky, as we want to e.g. keep the mod_times associated with
                 // a folder.
-                let mod_metadata_exits = existing_item.is_some() && !existing_item.as_ref().unwrap().item.is_deleted;
+                let mod_metadata_exits = existing_item.is_some() && existing_item.as_ref().unwrap().item.file_type != FileType::DELETED;
                 if mod_metadata_exits {
                     diesel::update(mod_metadatas::table.find(item.id))
                         .set(mod_metadata::UpdateCreator{
@@ -776,7 +771,7 @@ impl MetadataDB {
     /// Loads the mod time vector stored in the DB for this item.
     /// For now this will be the full vector, but we might change this in later iterations.
     fn load_max_mod_time_for_folder(&self, data_item: &mut DBItemInternal) -> Result<()> {
-        if data_item.item.is_file || data_item.item.is_deleted {
+        if data_item.item.file_type != FileType::DIRECTORY {
             // Skip the loading, makes only sense for folders that exist
         } else {
             let mod_time_entries: Vec<ModTime> = mod_times::table
@@ -840,7 +835,7 @@ impl MetadataDB {
         let mut deleted = 0;
 
         // Make sure to delete children of folders recursively
-        if !path_items.last().unwrap().item.is_file {
+        if path_items.last().unwrap().item.file_type == FileType::DIRECTORY {
             let dir_entries = self.load_child_items(&path_items.last().unwrap(), false)?;
 
             for dir_entry in dir_entries {
@@ -851,10 +846,10 @@ impl MetadataDB {
         }
 
         // Update Owner Info to be deleted
-        if !path_items.last().unwrap().item.is_deleted {
+        if path_items.last().unwrap().item.file_type != FileType::DELETED {
             // Register the change in deletion_status
             diesel::update(items::table.filter(items::id.eq(path_items.last().unwrap().item.id)))
-                .set(items::is_deleted.eq(true))
+                .set(items::file_type.eq(FileType::DELETED))
                 .execute(&self.conn)?;
 
             // Push the parent folders last mod time
@@ -930,7 +925,7 @@ impl MetadataDB {
         );
 
         for path_item in path_items.iter().rev() {
-            if !path_item.item.is_file {
+            if path_item.item.file_type == FileType::DIRECTORY {
                 let current_mod_time = mod_times::table
                     .select(mod_times::time)
                     .filter(
@@ -1042,8 +1037,7 @@ impl MetadataDB {
                 data_store_id: data_store.id,
                 path_component_id: root_path.id,
 
-                is_file: false,
-                is_deleted: false,
+                file_type: FileType::DIRECTORY,
             })
             .execute(&self.conn)?;
         let root_item = items::table

@@ -89,8 +89,7 @@ fn create_table_item(conn: &SqliteConnection) -> Result<()> {
                 data_store_id       INTEGER NOT NULL,
                 path_component_id   INTEGER NOT NULL,
 
-                is_file             INTEGER NOT NULL,
-                is_deleted          INTEGER NOT NULL,
+                file_type INTEGER NOT NULL,
 
                 UNIQUE(path_component_id, data_store_id),
                 FOREIGN KEY(data_store_id)      REFERENCES data_stores(id),
