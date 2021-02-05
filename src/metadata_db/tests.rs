@@ -57,7 +57,8 @@ fn assert_mod_time(metadata_store: &MetadataDB, name: &str, key: i64, value: i64
     match item.content {
         ItemType::FILE { .. } => assert_eq!(item.mod_time()[&key], value),
         ItemType::FOLDER { .. } => assert_eq!(item.mod_time()[&key], value),
-        ItemType::DELETION => panic!("Must not check mod times on deletions"),
+        ItemType::DELETION => panic!("Must not check mod times on deletions!"),
+        ItemType::IGNORED => panic!("Must not check mod times on ignored items!"),
     };
 }
 fn assert_sync_time(metadata_store: &MetadataDB, name: &str, key: i64, value: i64) {

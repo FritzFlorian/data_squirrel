@@ -27,14 +27,14 @@ pub type DefaultDataStore = DataStore<virtual_fs::WrapperFS>;
 
 impl<FS: virtual_fs::FS> DataStore<FS> {
     /// Same as open_with_fs, but uses the default FS abstraction (OS native calls).
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::open_with_fs(&path, FS::default())
     }
     /// Opens a data_store at a given path on the local disk.
     /// Makes sure that the required metadata directories and database are present.
     ///
     /// Returns errors if the data_store is already opened or does not exist.
-    pub fn open_with_fs(path: &Path, fs: FS) -> Result<Self> {
+    pub fn open_with_fs<P: AsRef<Path>>(path: P, fs: FS) -> Result<Self> {
         let fs_interaction = FSInteraction::open_with_fs(&path, fs)?;
         let metadata_db = MetadataDB::open(fs_interaction.metadata_db_path().to_str().unwrap())?;
 
@@ -104,31 +104,38 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(self.db_access.get_local_data_store()?.time)
     }
 
-    // The unique name of the data set. Must equal the unique name of any sync partner.
+    /// The unique name of the data set. Must equal the unique name of any sync partner.
     pub fn data_set_name(&self) -> Result<String> {
         Ok(self.db_access.get_data_set()?.unique_name)
     }
 
-    // The unique name of this local data store. Must be unique throughout all sync partners.
+    /// The unique name of this local data store. Must be unique throughout all sync partners.
     pub fn local_data_store_name(&self) -> Result<String> {
         Ok(self.db_access.get_local_data_store()?.unique_name)
     }
 
-    // The human readable description of this local data store.
+    /// The human readable description of this local data store.
     pub fn local_data_store_desc(&self) -> Result<String> {
         Ok(self.db_access.get_local_data_store()?.human_name)
     }
 
-    // Tries to optimize the database file.
-    // This generally shrinks its size and slightly improves performance.
+    /// Tries to optimize the database file.
+    /// This generally shrinks its size and slightly improves performance.
     pub fn optimize_database(&self) -> Result<()> {
         self.db_access.clean_up()?;
         Ok(())
     }
 
-    // Adds a glob rule to the ignored files during a normal file system scan.
+    /// Adds a glob rule to the ignored files during a normal file system scan.
     pub fn add_scan_ignore_rule(&mut self, rule: &str, persist_rule: bool) -> Result<()> {
         self.fs_access.add_ignore_rule(rule, persist_rule)?;
+
+        Ok(())
+    }
+
+    /// Removes temporary ignore rules (re-loads the rules from disk).
+    pub fn remove_temporary_ignore_rule(&mut self) -> Result<()> {
+        self.fs_access.reload_ignore_rules()?;
 
         Ok(())
     }
@@ -265,6 +272,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     })
                 }
                 metadata_db::ItemType::DELETION { .. } => panic!("We should never reach this!"),
+                metadata_db::ItemType::IGNORED { .. } => {
+                    panic!("Sync not yet implemented for ignored items!")
+                }
             }
         }
     }
@@ -428,7 +438,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                             metadata_db::ItemType::FOLDER { .. } => {
                                 self.fs_access.delete_directory(&localized_path)?
                             }
-                            metadata_db::ItemType::DELETION { .. } => (), // Nothing to do,
+                            metadata_db::ItemType::DELETION { .. } => (), // Nothing to do
+                            metadata_db::ItemType::IGNORED { .. } => {
+                                panic!("Sync not yet implemented for ignored items!")
+                            }
                         }
                         // ... move the downloaded file over it.
                         self.fs_access
@@ -722,6 +735,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         match db_item.content {
             metadata_db::ItemType::FILE { metadata, .. } => {
                 // We never ignore items if we already have DB entries.
+                // Mark it as NOT ignored by the DB entry.
                 fs_item.ignored = false;
 
                 if fs_item.metadata.as_ref().unwrap().is_file() {
@@ -748,12 +762,13 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             }
             metadata_db::ItemType::FOLDER { metadata, .. } => {
                 // We never ignore items if we already have DB entries.
+                // Mark it as NOT ignored by the DB entry.
                 fs_item.ignored = false;
 
                 if fs_item.metadata.as_ref().unwrap().is_file() {
                     // Delete existing directory db entry ...
-                    result.deleted_items += self
-                        .db_access
+                    result.deleted_items += 1;
+                    self.db_access
                         .delete_local_data_item(&fs_item.relative_path)?;
                     // ...replace it with a file entry.
                     result.new_items += 1;
@@ -765,7 +780,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             }
             metadata_db::ItemType::DELETION { .. } => {
                 if fs_item.ignored {
-                    // FIXME: Properly add ignore status to DB.
+                    self.db_access
+                        .ignore_local_data_item(&fs_item.relative_path)?;
+
+                    // FIXME: Properly report the ignored item!
                     eprintln!("Ignore Item: {:?}", &fs_item.relative_path);
                 } else {
                     // We have no local entry for the target file/dir in our DB.
@@ -777,6 +795,13 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         self.update_db_item(&fs_item, "")?;
                     }
                 }
+            }
+            metadata_db::ItemType::IGNORED { .. } => {
+                // Mark it as ignored by the DB entry.
+                fs_item.ignored = true;
+
+                // FIXME: Properly report the ignored item!
+                eprintln!("Ignore Item: {:?}", &fs_item.relative_path);
             }
         }
 
@@ -835,8 +860,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         for child_item in child_items.iter() {
             if !lower_case_names.contains(&child_item.path.name().to_lowercase()) {
                 let child_item_path = child_item.path.clone();
-                scan_result.deleted_items +=
-                    self.db_access.delete_local_data_item(&child_item_path)?;
+                scan_result.deleted_items += 1;
+                self.db_access.delete_local_data_item(&child_item_path)?;
             }
         }
 

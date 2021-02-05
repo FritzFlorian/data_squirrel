@@ -54,7 +54,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         result.acquire_exclusive_lock()?;
 
         result.ensure_metadata_dirs_exist()?;
-        result.load_ignore_rules()?;
+        result.reload_ignore_rules()?;
 
         Ok(result)
     }
@@ -306,8 +306,9 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         Ok(())
     }
 
-    // Creates the file holding ignored file patterns.
-    fn load_ignore_rules(&mut self) -> Result<()> {
+    /// Reloads the ignore rules from their file.
+    /// Creates the ignore rules file if it does not exist already.
+    pub fn reload_ignore_rules(&mut self) -> Result<()> {
         let result = self.fs.create_file(self.ignore_path());
         if result.is_err()
             && result.as_ref().err().unwrap().kind() != std::io::ErrorKind::AlreadyExists
@@ -316,6 +317,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             result?
         }
 
+        self.ignore_rules.clear();
         let rules_file_stream = self.fs.read_file(self.ignore_path())?;
         let buf_reader = BufReader::new(rules_file_stream);
         for line in buf_reader.lines() {

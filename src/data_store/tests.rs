@@ -102,10 +102,10 @@ fn scan_data_store_directory() {
             indexed_items: 3,
             changed_items: 0,
             new_items: 0,
-            deleted_items: 4
+            deleted_items: 2,
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 12);
+    assert_eq!(data_store_1.local_time().unwrap(), 10);
 
     // Re-add some
     in_memory_fs.create_file("file-1").unwrap();
@@ -121,7 +121,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 15);
+    assert_eq!(data_store_1.local_time().unwrap(), 13);
 
     // Changes in capitalization should be recognized as metadata changes
     in_memory_fs.rename("file-1", "FILE-1").unwrap();
@@ -138,7 +138,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 18);
+    assert_eq!(data_store_1.local_time().unwrap(), 16);
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
@@ -149,7 +149,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 18);
+    assert_eq!(data_store_1.local_time().unwrap(), 16);
 }
 
 #[test]
@@ -170,7 +170,9 @@ fn exclude_ignored_files_during_scan() {
     in_memory_fs.create_file("sub-1/sub-3/file-3").unwrap();
 
     // Ignore just sub-3 for now.
-    data_store_1.add_scan_ignore_rule("**/sub-3", true).unwrap();
+    data_store_1
+        .add_scan_ignore_rule("**/sub-3", false)
+        .unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
@@ -194,7 +196,7 @@ fn exclude_ignored_files_during_scan() {
     //       when we added them to the scan ignore rules.
     //       Think of this a lot like git ignore files: once you staged files they wont go away.
     data_store_1
-        .add_scan_ignore_rule("**/file-2", true)
+        .add_scan_ignore_rule("**/file-2", false)
         .unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
@@ -203,6 +205,45 @@ fn exclude_ignored_files_during_scan() {
             indexed_items: 7, // We expect to 'see' the ignored file-2
             changed_items: 1,
             new_items: 0,
+            deleted_items: 0
+        }
+    );
+
+    // Forget the scan ignore rules.
+    // We expect the already scanned items to just stay ignored, as we have the entries in our DB.
+    data_store_1.remove_temporary_ignore_rule().unwrap();
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 7,
+            changed_items: 0,
+            new_items: 0,
+            deleted_items: 0
+        }
+    );
+
+    // Deleting and re-creating an ignored file should 'clear' it from the db and then
+    // re-index it on the next scan.
+    in_memory_fs.remove_file("file-2").unwrap();
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 6,
+            changed_items: 0,
+            new_items: 0,
+            deleted_items: 1
+        }
+    );
+    in_memory_fs.create_file("file-2").unwrap();
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 7,
+            changed_items: 0,
+            new_items: 1,
             deleted_items: 0
         }
     );

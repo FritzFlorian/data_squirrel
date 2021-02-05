@@ -53,6 +53,7 @@ pub struct DBItem {
 #[derive(Clone)]
 pub enum ItemType {
     DELETION,
+    IGNORED,
     FILE {
         metadata: ItemFSMetadata,
         creation_time: VersionVector<i64>,
@@ -81,6 +82,13 @@ impl DBItem {
         let (item_type, file_name) = if item.item.file_type == FileType::DELETED {
             (
                 ItemType::DELETION,
+                RelativePath::from_path(item.path_component.full_path)
+                    .name()
+                    .to_owned(),
+            )
+        } else if item.item.file_type == FileType::IGNORED {
+            (
+                ItemType::IGNORED,
                 RelativePath::from_path(item.path_component.full_path)
                     .name()
                     .to_owned(),
@@ -157,6 +165,7 @@ impl DBItem {
             ItemType::FILE { .. } => FileType::FILE,
             ItemType::FOLDER { .. } => FileType::DIRECTORY,
             ItemType::DELETION { .. } => FileType::DELETED,
+            ItemType::IGNORED { .. } => FileType::IGNORED,
         }
     }
 
@@ -177,6 +186,7 @@ impl DBItem {
             ItemType::FILE { last_mod_time, .. } => last_mod_time,
             ItemType::FOLDER { last_mod_time, .. } => last_mod_time,
             ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
+            ItemType::IGNORED { .. } => panic!("Must not query mod_time of ignored item!"),
         }
     }
 
@@ -185,6 +195,7 @@ impl DBItem {
             ItemType::FILE { last_mod_time, .. } => last_mod_time,
             ItemType::FOLDER { mod_time, .. } => mod_time,
             ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
+            ItemType::IGNORED { .. } => panic!("Must not query mod_time of ignored item!"),
         }
     }
 
@@ -193,6 +204,7 @@ impl DBItem {
             ItemType::FILE { creation_time, .. } => creation_time,
             ItemType::FOLDER { creation_time, .. } => creation_time,
             ItemType::DELETION { .. } => panic!("Must not query creation time of deletion notice!"),
+            ItemType::IGNORED { .. } => panic!("Must not query creation time of ignored item!"),
         }
     }
 

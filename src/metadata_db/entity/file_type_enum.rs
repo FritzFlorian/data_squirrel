@@ -11,6 +11,7 @@ pub enum FileType {
     FILE = 1,
     DIRECTORY = 2,
     DELETED = 3,
+    IGNORED = 4,
 }
 
 impl<DB> FromSql<Integer, DB> for FileType
@@ -23,6 +24,7 @@ where
             x if x == Self::FILE as i32 => Ok(Self::FILE),
             x if x == Self::DIRECTORY as i32 => Ok(Self::DIRECTORY),
             x if x == Self::DELETED as i32 => Ok(Self::DELETED),
+            x if x == Self::IGNORED as i32 => Ok(Self::IGNORED),
             x => Err(format!("Unrecognized variant {}", x).into()),
         }
     }
