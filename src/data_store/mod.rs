@@ -747,10 +747,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(())
     }
 
-    #[allow(clippy::collapsible_if)] // We want to explicitly nest the listener hook.
-    /// Indexes the given item into the DB, i.e. updates the db to contain the current FS content.
+    #[allow(clippy::collapsible_if)]
+    /// Indexes the given dir into the DB, i.e. updates the db to contain the current FS content.
     /// Return's true if the indexed directory requires a recursive FS scan.
-    fn index_item<F>(&self, fs_item: &DataItem, bitrot: bool, listener: &mut F) -> Result<bool>
+    fn index_dir<F>(&self, fs_item: &DataItem, listener: &mut F) -> Result<bool>
     where
         F: FnMut(ScanEvent) -> bool,
     {
@@ -761,48 +761,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .get_local_data_item(&fs_item.relative_path, false)?;
 
         match db_item.content {
-            metadata_db::ItemType::FILE { ref metadata, .. } => {
-                if fs_item.metadata.as_ref().unwrap().is_file() {
-                    if Self::has_metadata_changed(&metadata, &fs_item) {
-                        if listener(ChangedFile(&fs_item, &db_item)) {
-                            let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
-                            self.update_db_item(&fs_item, &hash)?;
-                        }
-                    } else {
-                        listener(UnchangedFile(&fs_item, &db_item));
-                        if bitrot {
-                            let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
-                            if metadata.hash != hash {
-                                listener(IssueBitRot {
-                                    fs_item,
-                                    db_hash: &metadata.hash,
-                                    fs_hash: &hash,
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    if listener(ChangedFileToFolder(&fs_item, &db_item)) {
-                        // Delete the existing file db entry...
-                        self.db_access
-                            .delete_local_data_item(&fs_item.relative_path)?;
-                        // ... replace it with a directory...
-                        self.update_db_item(&fs_item, "")?;
-                        // ... and scan recursively.
-                        return Ok(true);
-                    }
+            metadata_db::ItemType::FILE { .. } => {
+                if listener(ChangedFileToFolder(&fs_item, &db_item)) {
+                    // Delete the existing file db entry...
+                    self.db_access
+                        .delete_local_data_item(&fs_item.relative_path)?;
+                    // ... replace it with a directory...
+                    self.update_db_item(&fs_item, "")?;
+                    return Ok(true);
                 }
             }
             metadata_db::ItemType::FOLDER { ref metadata, .. } => {
-                if fs_item.metadata.as_ref().unwrap().is_file() {
-                    if listener(ChangedFolderToFile(&fs_item, &db_item)) {
-                        // Delete existing directory db entry ...
-                        self.db_access
-                            .delete_local_data_item(&fs_item.relative_path)?;
-                        // ...replace it with a file entry.
-                        self.update_db_item(&fs_item, "")?;
-                    }
-                } else if Self::has_metadata_changed(&metadata, &fs_item) {
+                if Self::has_metadata_changed(&metadata, &fs_item) {
                     if listener(ChangedFolder(&fs_item, &db_item)) {
                         self.update_db_item(&fs_item, "")?;
                         return Ok(true);
@@ -820,16 +790,73 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                             .ignore_local_data_item(&fs_item.relative_path)?;
                     }
                 } else {
-                    if fs_item.metadata.as_ref().unwrap().is_file() {
-                        if listener(NewFile(&fs_item)) {
-                            let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
-                            self.update_db_item(&fs_item, &hash)?;
+                    if listener(NewFolder(&fs_item)) {
+                        self.update_db_item(&fs_item, "")?;
+                        return Ok(true);
+                    }
+                }
+            }
+            metadata_db::ItemType::IGNORED { .. } => {
+                // Mark it as ignored by the DB entry.
+                listener(IgnoredExistingItem(&fs_item));
+            }
+        };
+
+        Ok(false)
+    }
+
+    #[allow(clippy::collapsible_if)] // We want to explicitly nest the listener hook.
+    /// Indexes the given file into the DB, i.e. updates the db to contain the current FS content.
+    fn index_file<F>(&self, fs_item: &DataItem, bitrot: bool, listener: &mut F) -> Result<()>
+    where
+        F: FnMut(ScanEvent) -> bool,
+    {
+        use self::ScanEvent::*;
+
+        let db_item = self
+            .db_access
+            .get_local_data_item(&fs_item.relative_path, false)?;
+
+        match db_item.content {
+            metadata_db::ItemType::FILE { ref metadata, .. } => {
+                if Self::has_metadata_changed(&metadata, &fs_item) {
+                    if listener(ChangedFile(&fs_item, &db_item)) {
+                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                        self.update_db_item(&fs_item, &hash)?;
+                    }
+                } else {
+                    listener(UnchangedFile(&fs_item, &db_item));
+                    if bitrot {
+                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                        if metadata.hash != hash {
+                            listener(IssueBitRot {
+                                fs_item,
+                                db_hash: &metadata.hash,
+                                fs_hash: &hash,
+                            });
                         }
-                    } else {
-                        if listener(NewFolder(&fs_item)) {
-                            self.update_db_item(&fs_item, "")?;
-                            return Ok(true);
-                        }
+                    }
+                }
+            }
+            metadata_db::ItemType::FOLDER { .. } => {
+                if listener(ChangedFolderToFile(&fs_item, &db_item)) {
+                    // Delete existing directory db entry ...
+                    self.db_access
+                        .delete_local_data_item(&fs_item.relative_path)?;
+                    // ...replace it with a file entry.
+                    self.update_db_item(&fs_item, "")?;
+                }
+            }
+            metadata_db::ItemType::DELETION { .. } => {
+                if fs_item.ignored {
+                    if listener(IgnoredNewItem(&fs_item)) {
+                        self.db_access
+                            .ignore_local_data_item(&fs_item.relative_path)?;
+                    }
+                } else {
+                    if listener(NewFile(&fs_item)) {
+                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                        self.update_db_item(&fs_item, &hash)?;
                     }
                 }
             }
@@ -839,7 +866,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     #[allow(clippy::collapsible_if)] // We want to explicitly nest the listener hook.
@@ -853,16 +880,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let items = self.fs_access.index(&dir_item.relative_path)?;
 
         let mut lower_case_names = HashSet::new();
-        for mut item in items {
+        for item in items {
             lower_case_names.insert(item.relative_path.name().to_lowercase());
 
             if item.issue.is_none() {
                 let item_metadata = item.metadata.as_ref().unwrap();
                 match item_metadata.file_type() {
-                    virtual_fs::FileType::File | virtual_fs::FileType::Dir => {
-                        let recurse_into_dir = self.index_item(&mut item, false, listener)?;
-                        if recurse_into_dir {
-                            self.perform_scan(&mut item, listener)?;
+                    virtual_fs::FileType::File => {
+                        self.index_file(&item, false, listener)?;
+                    }
+                    virtual_fs::FileType::Dir => {
+                        if self.index_dir(&item, listener)? {
+                            self.perform_scan(&item, listener)?;
                         }
                     }
                     virtual_fs::FileType::Link => {
