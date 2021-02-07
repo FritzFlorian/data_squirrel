@@ -99,7 +99,7 @@ fn scan_data_store_directory() {
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 3,
+            indexed_items: 5,
             changed_items: 0,
             new_items: 0,
             deleted_items: 2,
@@ -230,7 +230,7 @@ fn exclude_ignored_files_during_scan() {
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 6,
+            indexed_items: 7,
             changed_items: 0,
             new_items: 0,
             deleted_items: 1

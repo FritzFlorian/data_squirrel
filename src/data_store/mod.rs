@@ -14,8 +14,11 @@ mod synchronization_messages;
 use self::synchronization_messages::*;
 mod scan_result;
 pub use self::scan_result::ScanResult;
+mod scan_event;
+pub use self::scan_event::*;
 mod errors;
 pub use self::errors::*;
+use data_store::ScanEvent::DeletedItem;
 use fs_interaction::DataItem;
 use metadata_db::{DBItem, ItemFSMetadata};
 
@@ -161,7 +164,27 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             ignored: false,
         };
 
-        self.perform_scan(&root_data_item)
+        let mut scan_result = ScanResult::new();
+        self.perform_scan(&root_data_item, &mut |event| {
+            scan_result.indexed_items += 1;
+
+            match event {
+                ScanEvent::NewFolder(..) | ScanEvent::NewFile(..) => scan_result.new_items += 1,
+                ScanEvent::ChangedFolder(..) | ScanEvent::ChangedFile(..) => {
+                    scan_result.changed_items += 1
+                }
+                ScanEvent::ChangedFolderToFile { .. } | ScanEvent::ChangedFileToFolder { .. } => {
+                    scan_result.deleted_items += 1;
+                    scan_result.new_items += 1;
+                }
+                ScanEvent::DeletedItem(..) => scan_result.deleted_items += 1,
+                _ => (),
+            };
+
+            true
+        })?;
+
+        Ok(scan_result)
     }
 
     /// Includes the data stores given into the local database and returns a list of all
@@ -724,94 +747,106 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(())
     }
 
-    fn index_item(&self, fs_item: &mut DataItem, detect_bitrot: bool) -> Result<ScanResult> {
-        let mut result = ScanResult::new();
-        result.indexed_items += 1;
+    #[allow(clippy::collapsible_if)] // We want to explicitly nest the listener hook.
+    /// Indexes the given item into the DB, i.e. updates the db to contain the current FS content.
+    /// Return's true if the indexed directory requires a recursive FS scan.
+    fn index_item<F>(&self, fs_item: &DataItem, bitrot: bool, listener: &mut F) -> Result<bool>
+    where
+        F: FnMut(ScanEvent) -> bool,
+    {
+        use self::ScanEvent::*;
 
         let db_item = self
             .db_access
             .get_local_data_item(&fs_item.relative_path, false)?;
 
         match db_item.content {
-            metadata_db::ItemType::FILE { metadata, .. } => {
-                // We never ignore items if we already have DB entries.
-                // Mark it as NOT ignored by the DB entry.
-                fs_item.ignored = false;
-
+            metadata_db::ItemType::FILE { ref metadata, .. } => {
                 if fs_item.metadata.as_ref().unwrap().is_file() {
                     if Self::has_metadata_changed(&metadata, &fs_item) {
-                        result.changed_items += 1;
-                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
-                        self.update_db_item(&fs_item, &hash)?;
-                    } else if detect_bitrot {
-                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
-                        if metadata.hash != hash {
-                            // TODO: properly handle this by returning errors.
-                            panic!("Bitrot detected!")
+                        if listener(ChangedFile(&fs_item, &db_item)) {
+                            let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                            self.update_db_item(&fs_item, &hash)?;
+                        }
+                    } else {
+                        listener(UnchangedFile(&fs_item, &db_item));
+                        if bitrot {
+                            let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                            if metadata.hash != hash {
+                                listener(IssueBitRot {
+                                    fs_item,
+                                    db_hash: &metadata.hash,
+                                    fs_hash: &hash,
+                                });
+                            }
                         }
                     }
                 } else {
-                    // Delete the existing file db entry...
-                    result.deleted_items += 1;
-                    self.db_access
-                        .delete_local_data_item(&fs_item.relative_path)?;
-                    // ... replace it with a directory.
-                    result.new_items += 1;
-                    self.update_db_item(&fs_item, "")?;
+                    if listener(ChangedFileToFolder(&fs_item, &db_item)) {
+                        // Delete the existing file db entry...
+                        self.db_access
+                            .delete_local_data_item(&fs_item.relative_path)?;
+                        // ... replace it with a directory...
+                        self.update_db_item(&fs_item, "")?;
+                        // ... and scan recursively.
+                        return Ok(true);
+                    }
                 }
             }
-            metadata_db::ItemType::FOLDER { metadata, .. } => {
-                // We never ignore items if we already have DB entries.
-                // Mark it as NOT ignored by the DB entry.
-                fs_item.ignored = false;
-
+            metadata_db::ItemType::FOLDER { ref metadata, .. } => {
                 if fs_item.metadata.as_ref().unwrap().is_file() {
-                    // Delete existing directory db entry ...
-                    result.deleted_items += 1;
-                    self.db_access
-                        .delete_local_data_item(&fs_item.relative_path)?;
-                    // ...replace it with a file entry.
-                    result.new_items += 1;
-                    self.update_db_item(&fs_item, "")?;
+                    if listener(ChangedFolderToFile(&fs_item, &db_item)) {
+                        // Delete existing directory db entry ...
+                        self.db_access
+                            .delete_local_data_item(&fs_item.relative_path)?;
+                        // ...replace it with a file entry.
+                        self.update_db_item(&fs_item, "")?;
+                    }
                 } else if Self::has_metadata_changed(&metadata, &fs_item) {
-                    result.changed_items += 1;
-                    self.update_db_item(&fs_item, "")?;
+                    if listener(ChangedFolder(&fs_item, &db_item)) {
+                        self.update_db_item(&fs_item, "")?;
+                        return Ok(true);
+                    }
+                } else {
+                    if listener(UnchangedFolder(&fs_item, &db_item)) {
+                        return Ok(true);
+                    }
                 }
             }
             metadata_db::ItemType::DELETION { .. } => {
                 if fs_item.ignored {
-                    self.db_access
-                        .ignore_local_data_item(&fs_item.relative_path)?;
-
-                    // FIXME: Properly report the ignored item!
-                    eprintln!("Ignore Item: {:?}", &fs_item.relative_path);
+                    if listener(IgnoredNewItem(&fs_item)) {
+                        self.db_access
+                            .ignore_local_data_item(&fs_item.relative_path)?;
+                    }
                 } else {
-                    // We have no local entry for the target file/dir in our DB.
-                    result.new_items += 1;
                     if fs_item.metadata.as_ref().unwrap().is_file() {
-                        let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
-                        self.update_db_item(&fs_item, &hash)?;
+                        if listener(NewFile(&fs_item)) {
+                            let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;
+                            self.update_db_item(&fs_item, &hash)?;
+                        }
                     } else {
-                        self.update_db_item(&fs_item, "")?;
+                        if listener(NewFolder(&fs_item)) {
+                            self.update_db_item(&fs_item, "")?;
+                            return Ok(true);
+                        }
                     }
                 }
             }
             metadata_db::ItemType::IGNORED { .. } => {
                 // Mark it as ignored by the DB entry.
-                fs_item.ignored = true;
-
-                // FIXME: Properly report the ignored item!
-                eprintln!("Ignore Item: {:?}", &fs_item.relative_path);
+                listener(IgnoredExistingItem(&fs_item));
             }
         }
 
-        Ok(result)
+        Ok(false)
     }
 
-    fn perform_scan(&self, dir_item: &DataItem) -> Result<ScanResult> {
-        // We keep track of 'scan events' to know how many items we scanned/where changed.
-        let mut scan_result = ScanResult::new();
-
+    #[allow(clippy::collapsible_if)] // We want to explicitly nest the listener hook.
+    fn perform_scan<F>(&self, dir_item: &DataItem, listener: &mut F) -> Result<()>
+    where
+        F: FnMut(ScanEvent) -> bool,
+    {
         // First, we index each file present on disk in this directory.
         // This is the 'positive' part of the scan operation, i.e. we add anything that is on
         // disk and not in the DB, as well as anything that has changed on disk.
@@ -824,30 +859,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             if item.issue.is_none() {
                 let item_metadata = item.metadata.as_ref().unwrap();
                 match item_metadata.file_type() {
-                    virtual_fs::FileType::File => {
-                        let file_scan_result = self.index_item(&mut item, false)?;
-                        scan_result = scan_result.combine(&file_scan_result);
-                    }
-                    virtual_fs::FileType::Dir => {
-                        let dir_scan_result = self.index_item(&mut item, false)?;
-                        scan_result = scan_result.combine(&dir_scan_result);
-
-                        if !item.ignored {
-                            let recursive_result = self.perform_scan(&mut item)?;
-                            scan_result = scan_result.combine(&recursive_result);
+                    virtual_fs::FileType::File | virtual_fs::FileType::Dir => {
+                        let recurse_into_dir = self.index_item(&mut item, false, listener)?;
+                        if recurse_into_dir {
+                            self.perform_scan(&mut item, listener)?;
                         }
                     }
                     virtual_fs::FileType::Link => {
-                        // Todo: Properly collect un-handled links to the caller.
-                        eprintln!("Skipping Link {:?}...", item.relative_path);
+                        listener(ScanEvent::IssueSkipLink(&item));
                     }
                 }
             } else {
-                // TODO: Properly collect issues and report them to the caller.
-                eprintln!(
-                    "Issues with data item {:?}: {:?}",
-                    item.relative_path, item.issue
-                );
+                listener(ScanEvent::IssueOther(&item, &item.issue.as_ref().unwrap()));
             }
         }
 
@@ -859,13 +882,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .get_local_child_items(&dir_item.relative_path, false)?;
         for child_item in child_items.iter() {
             if !lower_case_names.contains(&child_item.path.name().to_lowercase()) {
-                let child_item_path = child_item.path.clone();
-                scan_result.deleted_items += 1;
-                self.db_access.delete_local_data_item(&child_item_path)?;
+                if listener(DeletedItem(child_item)) {
+                    let child_item_path = child_item.path.clone();
+                    self.db_access.delete_local_data_item(&child_item_path)?;
+                }
             }
         }
 
-        Ok(scan_result)
+        Ok(())
     }
 }
 
