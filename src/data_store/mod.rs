@@ -249,7 +249,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         if local_item.is_deletion() {
             Ok(IntSyncResponse {
                 sync_time: local_item.sync_time,
-                action: IntSyncAction::UpdateRequired(IntSyncContent::Deletion),
+                action: IntSyncAction::UpdateRequired(IntSyncContent::Deletion(
+                    IntDeletionSyncContent {},
+                )),
             })
         } else if local_item.mod_time() <= &sync_request.item_sync_time {
             Ok(IntSyncResponse {
@@ -265,11 +267,13 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     last_mod_time: local_last_mod_time,
                 } => Ok(IntSyncResponse {
                     sync_time: local_item.sync_time,
-                    action: IntSyncAction::UpdateRequired(IntSyncContent::File {
-                        last_mod_time: local_last_mod_time,
-                        creation_time: local_creation_time,
-                        fs_metadata: local_metadata,
-                    }),
+                    action: IntSyncAction::UpdateRequired(IntSyncContent::File(
+                        IntFileSyncContent {
+                            last_mod_time: local_last_mod_time,
+                            creation_time: local_creation_time,
+                            fs_metadata: local_metadata,
+                        },
+                    )),
                 }),
                 metadata_db::ItemType::FOLDER {
                     last_mod_time: local_last_mod_time,
@@ -286,12 +290,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
                     Ok(IntSyncResponse {
                         sync_time: local_item.sync_time,
-                        action: IntSyncAction::UpdateRequired(IntSyncContent::Folder {
-                            last_mod_time: local_last_mod_time,
-                            creation_time: local_creation_time,
-                            fs_metadata: local_metadata,
-                            child_items: child_item_names,
-                        }),
+                        action: IntSyncAction::UpdateRequired(IntSyncContent::Folder(
+                            IntFolderSyncContent {
+                                last_mod_time: local_last_mod_time,
+                                creation_time: local_creation_time,
+                                fs_metadata: local_metadata,
+                                child_items: child_item_names,
+                            },
+                        )),
                     })
                 }
                 metadata_db::ItemType::DELETION { .. } => panic!("We should never reach this!"),
@@ -375,228 +381,34 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }
 
                 match sync_content {
-                    IntSyncContent::Deletion => {
-                        if local_item.is_deletion() {
-                            // Both agree that the file should be deleted. Ignore any potential
-                            // conflicts, just settle and be happy that we agree on the state.
-                            let mut target_item = local_item;
-                            target_item.sync_time.max(&sync_response.sync_time);
-                            self.db_access
-                                .sync_local_data_item(&localized_path, &target_item)?;
-                        } else if local_item.creation_time() <= &sync_response.sync_time {
-                            // The remote deletion notice is targeting our local file/folder.
-                            if local_item.mod_time() <= &sync_response.sync_time {
-                                // The remote deletion notice knows of all our changes.
-                                // Delete the actual item on disk...
-                                if local_item.is_file() {
-                                    self.fs_access.delete_file(&localized_path)?;
-                                } else {
-                                    self.fs_access.delete_directory(&localized_path)?;
-                                }
-
-                                // ...and insert the appropriate deletion notice into our local db.
-                                let target_item = metadata_db::DBItem {
-                                    path: localized_path.clone(),
-                                    sync_time: sync_response.sync_time.clone(),
-
-                                    content: metadata_db::ItemType::DELETION,
-                                };
-                                self.db_access
-                                    .sync_local_data_item(&localized_path, &target_item)?;
-                            } else {
-                                panic!("Detected sync-conflict!");
-                            }
-                        } else {
-                            // The deletion notice does not 'target' our file, i.e. it does
-                            // not know about our local file, as the local file was created
-                            // logically independent of the other copy.
-                            // Just do nothing more than take up the target sync time.
-                            let mut target_item = local_item;
-                            target_item.sync_time.max(&sync_response.sync_time);
-                            self.db_access
-                                .sync_local_data_item(&localized_path, &target_item)?;
-                        }
-                    }
-                    IntSyncContent::File {
-                        last_mod_time: remote_last_mod_time,
-                        fs_metadata: remote_fs_metadata,
-                        creation_time: remote_creation_time,
-                    } => {
-                        let remote_path = localized_path
-                            .parent()
-                            .join_mut(remote_fs_metadata.case_sensitive_name.clone());
-
-                        if local_item.is_deletion() && remote_creation_time <= local_item.sync_time
-                        {
-                            // We know of the other file in our history and have deleted it.
-                            // At the same time there is new data for this item on the remote...
-                            panic!(
-                                "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
-                            );
-                        }
-                        if !local_item.is_deletion()
-                            && !(local_item.mod_time() <= &sync_response.sync_time)
-                        {
-                            // The remote has a new change, but does not know everything about
-                            // our local changes...
-                            panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
-                        }
-
-                        // ...download file.
-                        let tmp_file_path = self.download_file(&from_other, &localized_path)?;
-                        self.fs_access.set_metadata(
-                            &tmp_file_path,
-                            FileTime::from_unix_time(
-                                remote_fs_metadata.mod_time.timestamp(),
-                                remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
-                            ),
-                            remote_fs_metadata.is_read_only,
+                    IntSyncContent::Deletion(content) => {
+                        self.sync_deletion(
+                            &from_other,
+                            local_item,
+                            localized_path,
+                            sync_response.sync_time,
+                            content,
                         )?;
-
-                        // ...remove local file/folder with same name.
-                        match &local_item.content {
-                            metadata_db::ItemType::FILE { .. } => {
-                                self.fs_access.delete_file(&localized_path)?
-                            }
-                            metadata_db::ItemType::FOLDER { .. } => {
-                                self.fs_access.delete_directory(&localized_path)?
-                            }
-                            metadata_db::ItemType::DELETION { .. } => (), // Nothing to do
-                            metadata_db::ItemType::IGNORED { .. } => {
-                                panic!("Sync not yet implemented for ignored items!")
-                            }
-                        }
-                        // ... move the downloaded file over it.
-                        self.fs_access
-                            .rename_file_or_directory(&tmp_file_path, &remote_path)?;
-
-                        // Insert the appropriate file item into our local db.
-                        let target_item = metadata_db::DBItem {
-                            path: localized_path.clone(),
-                            sync_time: sync_response.sync_time,
-                            content: metadata_db::ItemType::FILE {
-                                metadata: remote_fs_metadata,
-                                creation_time: remote_creation_time,
-                                last_mod_time: remote_last_mod_time,
-                            },
-                        };
-                        self.db_access
-                            .sync_local_data_item(&localized_path, &target_item)?;
                     }
-                    IntSyncContent::Folder {
-                        last_mod_time: remote_last_mod_time,
-                        creation_time: remote_creation_time,
-                        fs_metadata: remote_fs_metadata,
-                        child_items: remote_child_items,
-                    } => {
-                        let remote_path = localized_path
-                            .parent()
-                            .join_mut(remote_fs_metadata.case_sensitive_name.clone());
-
-                        if local_item.is_deletion() && remote_creation_time <= local_item.sync_time
-                        {
-                            // We know of the other file in our history and have deleted it.
-                            // At the same time there is new data for this item on the remote...
-                            panic!(
-                                "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
-                            );
-                        }
-                        if local_item.is_file()
-                            && !(local_item.mod_time() <= &sync_response.sync_time)
-                        {
-                            // The remote has a new change, but does not know everything about
-                            // our local changes...
-                            panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
-                        }
-
-                        // Make sure the folder exists.
-                        // In case it was a file before, it is going to be deleted.
-                        if local_item.is_file() {
-                            self.fs_access.delete_file(&localized_path)?;
-                        }
-
-                        // In case nothing was there before, we create the folder but DO NOT
-                        // add any notices on mod's/syc's to it (will be done AFTER the sync).
-                        if !local_item.is_folder() {
-                            self.fs_access.create_dir(&remote_path)?;
-                            self.fs_access.set_metadata(
-                                &remote_path,
-                                FileTime::from_unix_time(
-                                    remote_fs_metadata.mod_time.timestamp(),
-                                    remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
-                                ),
-                                false,
-                            )?;
-
-                            let folder_before_sync = metadata_db::DBItem {
-                                path: remote_path.clone(),
-                                sync_time: local_item.sync_time.clone(),
-                                content: metadata_db::ItemType::FOLDER {
-                                    metadata: remote_fs_metadata.clone(),
-                                    creation_time: remote_creation_time.clone(),
-                                    last_mod_time: remote_creation_time.clone(),
-                                    mod_time: VersionVector::new(),
-                                },
-                            };
-                            self.db_access
-                                .sync_local_data_item(&localized_path, &folder_before_sync)?;
-                        }
-
-                        // Recurse into items present on the other store...
-                        let mut visited_items = HashSet::with_capacity(remote_child_items.len());
-                        for remote_child_item in remote_child_items {
-                            visited_items.insert(remote_child_item.to_lowercase());
-
-                            self.sync_from_other_store_recursive(
-                                &from_other,
-                                &localized_path.join(remote_child_item),
-                                &local_mapper,
-                                &remote_mapper,
-                            )?;
-                        }
-                        // ...and also into local items (these should simply get deleted,
-                        // but we can optimize this later on after the basic works).
-                        for local_child in self
-                            .db_access
-                            .get_local_child_items(&localized_path, true)?
-                        {
-                            if !visited_items.contains(&local_child.path.name().to_lowercase()) {
-                                self.sync_from_other_store_recursive(
-                                    &from_other,
-                                    &local_child.path,
-                                    &local_mapper,
-                                    &remote_mapper,
-                                )?;
-                            }
-                        }
-
-                        // AFTER all sub-items are in sync, add the sync time of the remote
-                        // folder into this folder.
-                        // Also make sure the local folder metadata is correct.
-                        if local_item.is_folder() && local_item.path.name() != remote_path.name() {
-                            self.fs_access
-                                .rename_file_or_directory(&local_item.path, &remote_path)?;
-                        }
-                        self.fs_access.set_metadata(
-                            &remote_path,
-                            FileTime::from_unix_time(
-                                remote_fs_metadata.mod_time.timestamp(),
-                                remote_fs_metadata.mod_time.timestamp_subsec_nanos(),
-                            ),
-                            false,
+                    IntSyncContent::File(content) => {
+                        self.sync_file(
+                            &from_other,
+                            local_item,
+                            localized_path,
+                            sync_response.sync_time,
+                            content,
                         )?;
-                        let folder_after_sync = metadata_db::DBItem {
-                            path: remote_path,
-                            sync_time: sync_response.sync_time,
-                            content: metadata_db::ItemType::FOLDER {
-                                metadata: remote_fs_metadata,
-                                creation_time: remote_creation_time,
-                                last_mod_time: remote_last_mod_time,
-                                mod_time: VersionVector::new(),
-                            },
-                        };
-                        self.db_access
-                            .sync_local_data_item(&localized_path, &folder_after_sync)?;
+                    }
+                    IntSyncContent::Folder(content) => {
+                        self.sync_folder(
+                            &from_other,
+                            local_item,
+                            localized_path,
+                            sync_response.sync_time,
+                            content,
+                            &local_mapper,
+                            &remote_mapper,
+                        )?;
                     }
                 }
             }
@@ -604,6 +416,248 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
         Ok(())
     }
+
+    fn sync_folder(
+        &self,
+        from_other: &Self,
+        local_item: DBItem,
+        localized_path: RelativePath,
+        sync_time: VersionVector<i64>,
+        sync_content: IntFolderSyncContent,
+        local_mapper: &DataStoreIDMapper,
+        remote_mapper: &DataStoreIDMapper,
+    ) -> Result<()> {
+        let remote_path = localized_path
+            .parent()
+            .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
+
+        if local_item.is_deletion() && sync_content.creation_time <= local_item.sync_time {
+            // We know of the other file in our history and have deleted it.
+            // At the same time there is new data for this item on the remote...
+            panic!(
+                "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
+            );
+        }
+        if local_item.is_file() && !(local_item.mod_time() <= &sync_time) {
+            // The remote has a new change, but does not know everything about
+            // our local changes...
+            panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
+        }
+
+        // Make sure the folder exists.
+        // In case it was a file before, it is going to be deleted.
+        if local_item.is_file() {
+            self.fs_access.delete_file(&localized_path)?;
+        }
+
+        // In case nothing was there before, we create the folder but DO NOT
+        // add any notices on mod's/syc's to it (will be done AFTER the sync).
+        if !local_item.is_folder() {
+            self.fs_access.create_dir(&remote_path)?;
+            self.fs_access.set_metadata(
+                &remote_path,
+                FileTime::from_unix_time(
+                    sync_content.fs_metadata.mod_time.timestamp(),
+                    sync_content.fs_metadata.mod_time.timestamp_subsec_nanos(),
+                ),
+                false,
+            )?;
+
+            let folder_before_sync = metadata_db::DBItem {
+                path: remote_path.clone(),
+                sync_time: local_item.sync_time.clone(),
+                content: metadata_db::ItemType::FOLDER {
+                    metadata: sync_content.fs_metadata.clone(),
+                    creation_time: sync_content.creation_time.clone(),
+                    last_mod_time: sync_content.creation_time.clone(),
+                    mod_time: VersionVector::new(),
+                },
+            };
+            self.db_access
+                .sync_local_data_item(&localized_path, &folder_before_sync)?;
+        }
+
+        // Recurse into items present on the other store...
+        let mut visited_items = HashSet::with_capacity(sync_content.child_items.len());
+        for remote_child_item in sync_content.child_items {
+            visited_items.insert(remote_child_item.to_lowercase());
+
+            self.sync_from_other_store_recursive(
+                &from_other,
+                &localized_path.join(remote_child_item),
+                &local_mapper,
+                &remote_mapper,
+            )?;
+        }
+        // ...and also into local items (these should simply get deleted,
+        // but we can optimize this later on after the basic works).
+        for local_child in self
+            .db_access
+            .get_local_child_items(&localized_path, true)?
+        {
+            if !visited_items.contains(&local_child.path.name().to_lowercase()) {
+                self.sync_from_other_store_recursive(
+                    &from_other,
+                    &local_child.path,
+                    &local_mapper,
+                    &remote_mapper,
+                )?;
+            }
+        }
+
+        // AFTER all sub-items are in sync, add the sync time of the remote
+        // folder into this folder.
+        // Also make sure the local folder metadata is correct.
+        if local_item.is_folder() && local_item.path.name() != remote_path.name() {
+            self.fs_access
+                .rename_file_or_directory(&local_item.path, &remote_path)?;
+        }
+        self.fs_access.set_metadata(
+            &remote_path,
+            FileTime::from_unix_time(
+                sync_content.fs_metadata.mod_time.timestamp(),
+                sync_content.fs_metadata.mod_time.timestamp_subsec_nanos(),
+            ),
+            false,
+        )?;
+        let folder_after_sync = metadata_db::DBItem {
+            path: remote_path,
+            sync_time: sync_time,
+            content: metadata_db::ItemType::FOLDER {
+                metadata: sync_content.fs_metadata,
+                creation_time: sync_content.creation_time,
+                last_mod_time: sync_content.last_mod_time,
+                mod_time: VersionVector::new(),
+            },
+        };
+        self.db_access
+            .sync_local_data_item(&localized_path, &folder_after_sync)?;
+
+        Ok(())
+    }
+
+    fn sync_file(
+        &self,
+        from_other: &Self,
+        local_item: DBItem,
+        localized_path: RelativePath,
+        sync_time: VersionVector<i64>,
+        sync_content: IntFileSyncContent,
+    ) -> Result<()> {
+        let remote_path = localized_path
+            .parent()
+            .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
+
+        if local_item.is_deletion() && sync_content.creation_time <= local_item.sync_time {
+            // We know of the other file in our history and have deleted it.
+            // At the same time there is new data for this item on the remote...
+            panic!(
+                "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
+            );
+        }
+        if !local_item.is_deletion() && !(local_item.mod_time() <= &sync_time) {
+            // The remote has a new change, but does not know everything about
+            // our local changes...
+            panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
+        }
+
+        // ...download file.
+        let tmp_file_path = self.download_file(&from_other, &localized_path)?;
+        self.fs_access.set_metadata(
+            &tmp_file_path,
+            FileTime::from_unix_time(
+                sync_content.fs_metadata.mod_time.timestamp(),
+                sync_content.fs_metadata.mod_time.timestamp_subsec_nanos(),
+            ),
+            sync_content.fs_metadata.is_read_only,
+        )?;
+
+        // ...remove local file/folder with same name.
+        match &local_item.content {
+            metadata_db::ItemType::FILE { .. } => self.fs_access.delete_file(&localized_path)?,
+            metadata_db::ItemType::FOLDER { .. } => {
+                self.fs_access.delete_directory(&localized_path)?
+            }
+            metadata_db::ItemType::DELETION { .. } => (), // Nothing to do
+            metadata_db::ItemType::IGNORED { .. } => {
+                panic!("Sync not yet implemented for ignored items!")
+            }
+        }
+        // ... move the downloaded file over it.
+        self.fs_access
+            .rename_file_or_directory(&tmp_file_path, &remote_path)?;
+
+        // Insert the appropriate file item into our local db.
+        let target_item = metadata_db::DBItem {
+            path: localized_path.clone(),
+            sync_time: sync_time,
+            content: metadata_db::ItemType::FILE {
+                metadata: sync_content.fs_metadata,
+                creation_time: sync_content.creation_time,
+                last_mod_time: sync_content.last_mod_time,
+            },
+        };
+        self.db_access
+            .sync_local_data_item(&localized_path, &target_item)?;
+
+        Ok(())
+    }
+
+    fn sync_deletion(
+        &self,
+        _from_other: &Self,
+        local_item: DBItem,
+        localized_path: RelativePath,
+        sync_time: VersionVector<i64>,
+        _sync_content: IntDeletionSyncContent,
+    ) -> Result<()> {
+        if local_item.is_deletion() {
+            // Both agree that the file should be deleted. Ignore any potential
+            // conflicts, just settle and be happy that we agree on the state.
+            let mut target_item = local_item;
+            target_item.sync_time.max(&sync_time);
+            self.db_access
+                .sync_local_data_item(&localized_path, &target_item)?;
+        } else if local_item.creation_time() <= &sync_time {
+            // The remote deletion notice is targeting our local file/folder.
+            if local_item.mod_time() <= &sync_time {
+                // The remote deletion notice knows of all our changes.
+                // Delete the actual item on disk...
+                if local_item.is_file() {
+                    self.fs_access.delete_file(&localized_path)?;
+                } else {
+                    self.fs_access.delete_directory(&localized_path)?;
+                }
+
+                // ...and insert the appropriate deletion notice into our local db.
+                let target_item = metadata_db::DBItem {
+                    path: localized_path.clone(),
+                    sync_time: sync_time.clone(),
+
+                    content: metadata_db::ItemType::DELETION,
+                };
+                self.db_access
+                    .sync_local_data_item(&localized_path, &target_item)?;
+            } else {
+                panic!("Detected sync-conflict!");
+            }
+        } else {
+            // The deletion notice does not 'target' our file, i.e. it does
+            // not know about our local file, as the local file was created
+            // logically independent of the other copy.
+            // Just do nothing more than take up the target sync time.
+            let mut target_item = local_item;
+            target_item.sync_time.max(&sync_time);
+            self.db_access
+                .sync_local_data_item(&localized_path, &target_item)?;
+        }
+
+        Ok(())
+    }
+
+    ///////////////////////////////////
+    // 'private' helpers start here
+    ///////////////////////////////////
 
     fn download_file(&self, other: &Self, path: &RelativePath) -> Result<RelativePath> {
         use data_encoding::HEXUPPER;
@@ -632,10 +686,6 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     fn get_data_set(&self) -> metadata_db::Result<metadata_db::DataSet> {
         self.db_access.get_data_set()
     }
-
-    ///////////////////////////////////
-    // 'private' helpers start here
-    ///////////////////////////////////
 
     fn fs_to_date_time(fs_time: &filetime::FileTime) -> NaiveDateTime {
         NaiveDateTime::from_timestamp(fs_time.unix_seconds(), fs_time.nanoseconds())

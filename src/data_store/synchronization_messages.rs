@@ -64,20 +64,23 @@ pub enum ExtSyncAction {
     UpdateRequired(ExtSyncContent),
 }
 pub enum ExtSyncContent {
-    Deletion,
-    File {
-        last_mod_time: VersionVector<i64>,
-        creation_time: VersionVector<i64>,
+    Deletion(ExtDeletionSyncContent),
+    File(ExtFileSyncContent),
+    Folder(ExtFolderSyncContent),
+}
+pub struct ExtDeletionSyncContent {}
+pub struct ExtFileSyncContent {
+    pub last_mod_time: VersionVector<i64>,
+    pub creation_time: VersionVector<i64>,
 
-        fs_metadata: ItemFSMetadata,
-    },
-    Folder {
-        last_mod_time: VersionVector<i64>,
-        creation_time: VersionVector<i64>,
+    pub fs_metadata: ItemFSMetadata,
+}
+pub struct ExtFolderSyncContent {
+    pub last_mod_time: VersionVector<i64>,
+    pub creation_time: VersionVector<i64>,
 
-        fs_metadata: ItemFSMetadata,
-        child_items: Vec<String>,
-    },
+    pub fs_metadata: ItemFSMetadata,
+    pub child_items: Vec<String>,
 }
 
 pub struct IntSyncResponse {
@@ -89,20 +92,23 @@ pub enum IntSyncAction {
     UpdateRequired(IntSyncContent),
 }
 pub enum IntSyncContent {
-    Deletion,
-    File {
-        last_mod_time: VersionVector<i64>,
-        creation_time: VersionVector<i64>,
+    Deletion(IntDeletionSyncContent),
+    File(IntFileSyncContent),
+    Folder(IntFolderSyncContent),
+}
+pub struct IntDeletionSyncContent {}
+pub struct IntFileSyncContent {
+    pub last_mod_time: VersionVector<i64>,
+    pub creation_time: VersionVector<i64>,
 
-        fs_metadata: ItemFSMetadata,
-    },
-    Folder {
-        last_mod_time: VersionVector<i64>,
-        creation_time: VersionVector<i64>,
+    pub fs_metadata: ItemFSMetadata,
+}
+pub struct IntFolderSyncContent {
+    pub last_mod_time: VersionVector<i64>,
+    pub creation_time: VersionVector<i64>,
 
-        fs_metadata: ItemFSMetadata,
-        child_items: Vec<String>,
-    },
+    pub fs_metadata: ItemFSMetadata,
+    pub child_items: Vec<String>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -149,27 +155,18 @@ impl ExtSyncAction {
 impl ExtSyncContent {
     pub fn internalize(self, mapper: &DataStoreIDMapper) -> IntSyncContent {
         match self {
-            Self::Deletion => IntSyncContent::Deletion,
-            Self::File {
-                last_mod_time,
-                creation_time,
-                fs_metadata,
-            } => IntSyncContent::File {
-                last_mod_time: mapper.external_to_internal(&last_mod_time),
-                creation_time: mapper.external_to_internal(&creation_time),
-                fs_metadata,
-            },
-            Self::Folder {
-                last_mod_time,
-                creation_time,
-                fs_metadata,
-                child_items,
-            } => IntSyncContent::Folder {
-                last_mod_time: mapper.external_to_internal(&last_mod_time),
-                creation_time: mapper.external_to_internal(&creation_time),
-                fs_metadata,
-                child_items,
-            },
+            Self::Deletion(_content) => IntSyncContent::Deletion(IntDeletionSyncContent {}),
+            Self::File(content) => IntSyncContent::File(IntFileSyncContent {
+                last_mod_time: mapper.external_to_internal(&content.last_mod_time),
+                creation_time: mapper.external_to_internal(&content.creation_time),
+                fs_metadata: content.fs_metadata,
+            }),
+            Self::Folder(content) => IntSyncContent::Folder(IntFolderSyncContent {
+                last_mod_time: mapper.external_to_internal(&content.last_mod_time),
+                creation_time: mapper.external_to_internal(&content.creation_time),
+                fs_metadata: content.fs_metadata,
+                child_items: content.child_items,
+            }),
         }
     }
 }
@@ -196,27 +193,18 @@ impl IntSyncAction {
 impl IntSyncContent {
     pub fn externalize(self, _mapper: &DataStoreIDMapper) -> ExtSyncContent {
         match self {
-            Self::Deletion => ExtSyncContent::Deletion,
-            Self::File {
-                last_mod_time,
-                creation_time,
-                fs_metadata,
-            } => ExtSyncContent::File {
-                last_mod_time: last_mod_time,
-                creation_time: creation_time,
-                fs_metadata,
-            },
-            Self::Folder {
-                last_mod_time,
-                creation_time,
-                fs_metadata,
-                child_items,
-            } => ExtSyncContent::Folder {
-                last_mod_time: last_mod_time,
-                creation_time: creation_time,
-                fs_metadata,
-                child_items,
-            },
+            Self::Deletion(_content) => ExtSyncContent::Deletion(ExtDeletionSyncContent {}),
+            Self::File(content) => ExtSyncContent::File(ExtFileSyncContent {
+                last_mod_time: content.last_mod_time,
+                creation_time: content.creation_time,
+                fs_metadata: content.fs_metadata,
+            }),
+            Self::Folder(content) => ExtSyncContent::Folder(ExtFolderSyncContent {
+                last_mod_time: content.last_mod_time,
+                creation_time: content.creation_time,
+                fs_metadata: content.fs_metadata,
+                child_items: content.child_items,
+            }),
         }
     }
 }

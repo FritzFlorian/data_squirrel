@@ -471,7 +471,9 @@ impl MetadataDB {
                 diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
                     .set(items::file_type.eq(FileType::IGNORED))
                     .execute(&self.conn)?;
-                self.delete_item_metadata(&existing_item)?;
+                // In contrast to deleted items we keep its metadata. We can still sync
+                // 'only the metadata' when fetching changes to an remote. This way, the mod/sync
+                // timestamps are consistent in respect ot sync=min(children) and mod=max(children).
 
                 self.notify_change_for_optimization()?;
                 Ok(())
