@@ -74,6 +74,7 @@ where
 
         out.push_sql(" LEFT JOIN file_system_metadatas ON items.id = file_system_metadatas.id");
         out.push_sql(" LEFT JOIN mod_metadatas ON items.id = mod_metadatas.id");
+        out.push_sql(" ORDER BY path_components.full_path ASC");
 
         Ok(())
     }
