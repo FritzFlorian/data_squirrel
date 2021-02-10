@@ -259,7 +259,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 action: IntSyncAction::UpToDate,
             })
         } else {
-            // The actual interesting case where a substantial update is required.
+            // The actual interesting case where an update/data transfer is required.
             match local_item.content {
                 metadata_db::ItemType::FILE {
                     metadata: local_metadata,
@@ -300,9 +300,22 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         )),
                     })
                 }
-                metadata_db::ItemType::DELETION { .. } => panic!("We should never reach this!"),
-                metadata_db::ItemType::IGNORED { .. } => {
-                    panic!("Sync not yet implemented for ignored items!")
+                metadata_db::ItemType::IGNORED {
+                    creation_time: local_creation_time,
+                    last_mod_time: local_last_mod_time,
+                    mod_time: local_mod_time,
+                } => Ok(IntSyncResponse {
+                    sync_time: local_item.sync_time,
+                    action: IntSyncAction::UpdateRequired(IntSyncContent::Ignore(
+                        IntIgnoreSyncContent {
+                            creation_time: local_creation_time,
+                            last_mod_time: local_last_mod_time,
+                            mod_time: local_mod_time,
+                        },
+                    )),
+                }),
+                metadata_db::ItemType::DELETION { .. } => {
+                    panic!("Deletions must be already handled above!")
                 }
             }
         }
@@ -410,6 +423,15 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                             &remote_mapper,
                         )?;
                     }
+                    IntSyncContent::Ignore(content) => {
+                        self.sync_ignored(
+                            &from_other,
+                            local_item,
+                            localized_path,
+                            sync_response.sync_time,
+                            content,
+                        )?;
+                    }
                 }
             }
         }
@@ -443,6 +465,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             // our local changes...
             panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
         }
+
+        // FIXME: SyncIgnored
+        // If our local item is currently a deletion and the remote item would create it locally,
+        // check if the remote path is on our ignore glob list.
+        // If so, enter the item ONLY into our DB and immideatly ignore it.
+        // FIXME: SyncIgnored
+        // If our local item is currently ignored in the db update it with the new mod/sync
+        // information from the remote.
 
         // Make sure the folder exists.
         // In case it was a file before, it is going to be deleted.
@@ -561,6 +591,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
         }
 
+        // FIXME: SyncIgnored
+        // If our local item is currently a deletion and the remote item would create it locally,
+        // check if the remote path is on our ignore glob list.
+        // If so, enter the item ONLY into our DB and immideatly ignore it.
+        // FIXME: SyncIgnored
+        // If our local item is currently ignored in the db update it with the new mod/sync
+        // information from the remote.
+
         // ...download file.
         let tmp_file_path = self.download_file(&from_other, &localized_path)?;
         self.fs_access.set_metadata(
@@ -611,6 +649,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         sync_time: VersionVector<i64>,
         _sync_content: IntDeletionSyncContent,
     ) -> Result<()> {
+        // FIXME: SyncIgnored
+        // If our local item is currently ignored in the db and the remote has a 'newer' deletion
+        // to offer, remove our local ignore entry.
+        // (Note: this strongly advises FOR the case that we just 'plain ignore' local items
+        // that match our ignore glob patterns).
+
         if local_item.is_deletion() {
             // Both agree that the file should be deleted. Ignore any potential
             // conflicts, just settle and be happy that we agree on the state.
@@ -653,6 +697,23 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         Ok(())
+    }
+
+    fn sync_ignored(
+        &self,
+        _from_other: &Self,
+        _local_item: DBItem,
+        _localized_path: RelativePath,
+        _sync_time: VersionVector<i64>,
+        _sync_content: IntIgnoreSyncContent,
+    ) -> Result<()> {
+        // FIXME: SyncIgnored
+        // If our local item is also ignored, we can take the remote data and proceed with
+        // the sync as planned.
+        // If our local item is NOT ignored, we can not really use the information about an
+        // ignored item that is more up-to-date than our local copy.
+        // Report that the sync CAN NOT update the parent items sync time.
+        panic!("We do currently not handle incoming ignored items when syncing!");
     }
 
     ///////////////////////////////////
@@ -835,10 +896,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             }
             metadata_db::ItemType::DELETION { .. } => {
                 if fs_item.ignored {
-                    if listener(IgnoredNewItem(&fs_item)) {
-                        self.db_access
-                            .ignore_local_data_item(&fs_item.relative_path)?;
-                    }
+                    // Do not do anything with ignored files that have no DB entries!
+                    listener(IgnoredNewItem(&fs_item));
                 } else {
                     if listener(NewFolder(&fs_item)) {
                         self.update_db_item(&fs_item, "")?;
@@ -899,10 +958,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             }
             metadata_db::ItemType::DELETION { .. } => {
                 if fs_item.ignored {
-                    if listener(IgnoredNewItem(&fs_item)) {
-                        self.db_access
-                            .ignore_local_data_item(&fs_item.relative_path)?;
-                    }
+                    // Do not do anything with ignored files that have no DB entries!
+                    listener(IgnoredNewItem(&fs_item));
                 } else {
                     if listener(NewFile(&fs_item)) {
                         let hash = self.fs_access.calculate_hash(&fs_item.relative_path)?;

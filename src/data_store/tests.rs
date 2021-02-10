@@ -209,9 +209,20 @@ fn exclude_ignored_files_during_scan() {
         }
     );
 
-    // Forget the scan ignore rules.
-    // We expect the already scanned items to just stay ignored, as we have the entries in our DB.
-    data_store_1.remove_temporary_ignore_rule().unwrap();
+    // Deleting and re-creating an file should 'clear' it from the db and then
+    // the next re-index will ignore it.
+    in_memory_fs.remove_file("file-2").unwrap();
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 7,
+            changed_items: 0,
+            new_items: 0,
+            deleted_items: 1,
+        }
+    );
+    in_memory_fs.create_file("file-2").unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
@@ -223,27 +234,15 @@ fn exclude_ignored_files_during_scan() {
         }
     );
 
-    // Deleting and re-creating an ignored file should 'clear' it from the db and then
-    // re-index it on the next scan.
-    in_memory_fs.remove_file("file-2").unwrap();
+    // Forget the scan ignore rules. Now we should see all the files again.
+    data_store_1.remove_temporary_ignore_rule().unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 7,
+            indexed_items: 8,
             changed_items: 0,
-            new_items: 0,
-            deleted_items: 1
-        }
-    );
-    in_memory_fs.create_file("file-2").unwrap();
-    let changes = data_store_1.perform_full_scan().unwrap();
-    assert_eq!(
-        changes,
-        ScanResult {
-            indexed_items: 7,
-            changed_items: 0,
-            new_items: 1,
+            new_items: 4,
             deleted_items: 0
         }
     );

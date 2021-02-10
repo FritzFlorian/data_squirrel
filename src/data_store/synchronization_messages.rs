@@ -67,6 +67,7 @@ pub enum ExtSyncContent {
     Deletion(ExtDeletionSyncContent),
     File(ExtFileSyncContent),
     Folder(ExtFolderSyncContent),
+    Ignore(ExtIgnoreSyncContent),
 }
 pub struct ExtDeletionSyncContent {}
 pub struct ExtFileSyncContent {
@@ -82,6 +83,12 @@ pub struct ExtFolderSyncContent {
     pub fs_metadata: ItemFSMetadata,
     pub child_items: Vec<String>,
 }
+pub struct ExtIgnoreSyncContent {
+    pub creation_time: VersionVector<i64>,
+
+    pub last_mod_time: VersionVector<i64>,
+    pub mod_time: VersionVector<i64>,
+}
 
 pub struct IntSyncResponse {
     pub sync_time: VersionVector<i64>,
@@ -95,6 +102,7 @@ pub enum IntSyncContent {
     Deletion(IntDeletionSyncContent),
     File(IntFileSyncContent),
     Folder(IntFolderSyncContent),
+    Ignore(IntIgnoreSyncContent),
 }
 pub struct IntDeletionSyncContent {}
 pub struct IntFileSyncContent {
@@ -109,6 +117,12 @@ pub struct IntFolderSyncContent {
 
     pub fs_metadata: ItemFSMetadata,
     pub child_items: Vec<String>,
+}
+pub struct IntIgnoreSyncContent {
+    pub creation_time: VersionVector<i64>,
+
+    pub last_mod_time: VersionVector<i64>,
+    pub mod_time: VersionVector<i64>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -167,6 +181,11 @@ impl ExtSyncContent {
                 fs_metadata: content.fs_metadata,
                 child_items: content.child_items,
             }),
+            Self::Ignore(content) => IntSyncContent::Ignore(IntIgnoreSyncContent {
+                creation_time: mapper.external_to_internal(&content.creation_time),
+                last_mod_time: mapper.external_to_internal(&content.last_mod_time),
+                mod_time: mapper.external_to_internal(&content.mod_time),
+            }),
         }
     }
 }
@@ -204,6 +223,11 @@ impl IntSyncContent {
                 creation_time: content.creation_time,
                 fs_metadata: content.fs_metadata,
                 child_items: content.child_items,
+            }),
+            Self::Ignore(content) => ExtSyncContent::Ignore(ExtIgnoreSyncContent {
+                creation_time: content.creation_time,
+                last_mod_time: content.last_mod_time,
+                mod_time: content.mod_time,
             }),
         }
     }

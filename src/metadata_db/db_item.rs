@@ -53,14 +53,20 @@ pub struct DBItem {
 #[derive(Clone)]
 pub enum ItemType {
     DELETION,
-    IGNORED,
     FILE {
         metadata: ItemFSMetadata,
         creation_time: VersionVector<i64>,
+
         last_mod_time: VersionVector<i64>,
     },
     FOLDER {
         metadata: ItemFSMetadata,
+        creation_time: VersionVector<i64>,
+
+        last_mod_time: VersionVector<i64>,
+        mod_time: VersionVector<i64>,
+    },
+    IGNORED {
         creation_time: VersionVector<i64>,
 
         last_mod_time: VersionVector<i64>,
@@ -79,20 +85,18 @@ pub struct ItemFSMetadata {
 
 impl DBItem {
     pub fn from_internal_item(parent_items: &Vec<DBItemInternal>, item: DBItemInternal) -> Self {
-        let (item_type, file_name) = if item.item.file_type == FileType::DELETED {
-            (
-                ItemType::DELETION,
+        let file_name = item
+            .fs_metadata
+            .as_ref()
+            .map(|metadata| metadata.case_sensitive_name.clone())
+            .unwrap_or(
                 RelativePath::from_path(item.path_component.full_path)
                     .name()
                     .to_owned(),
-            )
-        } else if item.item.file_type == FileType::IGNORED {
-            (
-                ItemType::IGNORED,
-                RelativePath::from_path(item.path_component.full_path)
-                    .name()
-                    .to_owned(),
-            )
+            );
+
+        let item_type = if item.item.file_type == FileType::DELETED {
+            ItemType::DELETION
         } else {
             // Query the creation and last modification info from the metadata.
             // (NOTE: this function expects a FULL item, i.e. all info should be present)
@@ -103,28 +107,24 @@ impl DBItem {
             meta_last_mod_time[&item.mod_metadata.as_ref().unwrap().last_mod_store_id] =
                 item.mod_metadata.as_ref().unwrap().last_mod_store_time;
 
-            let metadata = Self::internal_to_external_metadata(item.fs_metadata.unwrap());
-            let file_name = metadata.case_sensitive_name.clone();
-            if item.item.file_type == FileType::FILE {
-                (
-                    ItemType::FILE {
-                        metadata: metadata,
-                        creation_time: meta_creation_time,
-                        last_mod_time: meta_last_mod_time,
-                    },
-                    file_name,
-                )
-            } else {
-                // Only folders have a max_mod_time attribute.
-                (
-                    ItemType::FOLDER {
-                        metadata: metadata,
-                        creation_time: meta_creation_time,
-                        mod_time: item.mod_time.unwrap(),
-                        last_mod_time: meta_last_mod_time,
-                    },
-                    file_name,
-                )
+            match item.item.file_type {
+                FileType::DELETED => panic!("Already handled above. Must not execute this!"),
+                FileType::FILE { .. } => ItemType::FILE {
+                    metadata: Self::internal_to_external_metadata(item.fs_metadata.unwrap()),
+                    creation_time: meta_creation_time,
+                    last_mod_time: meta_last_mod_time,
+                },
+                FileType::DIRECTORY { .. } => ItemType::FOLDER {
+                    metadata: Self::internal_to_external_metadata(item.fs_metadata.unwrap()),
+                    creation_time: meta_creation_time,
+                    mod_time: item.mod_time.unwrap(),
+                    last_mod_time: meta_last_mod_time,
+                },
+                FileType::IGNORED { .. } => ItemType::IGNORED {
+                    creation_time: meta_creation_time,
+                    last_mod_time: meta_last_mod_time,
+                    mod_time: item.mod_time.unwrap(),
+                },
             }
         };
 

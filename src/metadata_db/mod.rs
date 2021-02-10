@@ -462,7 +462,7 @@ impl MetadataDB {
 
             // Look for the item.
             let path_items = self.load_data_items_on_path(&local_data_store, &path, true)?;
-            let (parent_dir_item, existing_item) =
+            let (_parent_dir_item, existing_item) =
                 Self::extract_parent_dir_and_item(&path_items, path.path_component_number())?;
 
             if let Some(existing_item) = existing_item {
@@ -478,19 +478,9 @@ impl MetadataDB {
                 self.notify_change_for_optimization()?;
                 Ok(())
             } else {
-                // We only got the parent entry. Just store a note that we want to ignore the child.
-                let path_component =
-                    self.ensure_path_exists(path.name(), Some(&parent_dir_item.path_component))?;
-                diesel::insert_into(items::table)
-                    .values(item::InsertFull {
-                        path_component_id: path_component.id,
-                        data_store_id: local_data_store.id,
-                        file_type: FileType::IGNORED,
-                    })
-                    .execute(&self.conn)?;
-
-                self.notify_change_for_optimization()?;
-                Ok(())
+                Err(MetadataDBError::ViolatesDBConsistency {
+                    message: "Must not ignore non-existing items!",
+                })
             }
         })
     }
