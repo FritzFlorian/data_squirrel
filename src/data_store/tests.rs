@@ -580,7 +580,7 @@ fn sync_changes_in_file_name_case() {
 }
 
 #[test]
-fn multi_target() {
+fn multi_target_sync() {
     let (fs_1, data_store_1) = create_in_memory_store();
     let (fs_2, data_store_2) = create_in_memory_store();
     let (fs_3, data_store_3) = create_in_memory_store();
@@ -652,6 +652,85 @@ fn multi_target() {
     dir_should_contain(&fs_3, "", vec!["sub-1", "sub-2"]);
     dir_should_contain(&fs_3, "sub-1", vec!["file-2", "file-1"]);
     dir_should_not_contain(&fs_3, "sub-2", vec!["file-1"]);
+}
+
+#[test]
+fn multi_target_sync_with_ignores() {
+    let (fs_1, mut data_store_1) = create_in_memory_store();
+    let (fs_2, mut data_store_2) = create_in_memory_store();
+    let (fs_3, data_store_3) = create_in_memory_store();
+
+    // Two stores have a 'split' data set, i.e. they contain exclusive files (think sharding data).
+    fs_1.create_file("file-1").unwrap();
+    fs_1.create_file("file-2").unwrap();
+    fs_2.create_file("file-3").unwrap();
+    fs_2.create_file("file-4").unwrap();
+
+    // Now comes the interesting part. The two stores enforce th sharding, the ignore the other data.
+    data_store_1.add_scan_ignore_rule("/file-3", false).unwrap();
+    data_store_1.add_scan_ignore_rule("/file-4", false).unwrap();
+    data_store_2.add_scan_ignore_rule("/file-1", false).unwrap();
+    data_store_2.add_scan_ignore_rule("/file-2", false).unwrap();
+
+    // Index all.
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    data_store_3.perform_full_scan().unwrap();
+
+    // Syncing 1 and 2 up should leave both with only their initial data, but ignore notices about
+    // the other stores data.
+    data_store_1
+        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_not_contain(&fs_1, "", vec!["file-3", "file-4"]);
+    dir_should_not_contain(&fs_2, "", vec!["file-1", "file-2"]);
+
+    // Here comes the 'tricky' part:
+    // When we now sync from 2 -> 3, 2 will only send the two local files it holds to 3,
+    // as it can not provide the ignored files. The sync algorithm must be sure to NOT update
+    // the parent sync time at this point, as this could prevent a future sync from 1 -> 3.
+    data_store_3
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_3, "", vec!["file-1", "file-2"]);
+    data_store_3
+        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_3, "", vec!["file-1", "file-2", "file-3", "file-4"]);
+
+    // Syncing back out from 3 should work.
+    fs_3.create_file("file-5").unwrap();
+    fs_3.remove_file("file-1").unwrap();
+    fs_3.remove_file("file-3").unwrap();
+    data_store_3.perform_full_scan().unwrap();
+
+    // 3 -> 1 should propagate ALL changes (also deletion of file-3).
+    data_store_1
+        .sync_from_other_store(&data_store_3, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_1, "", vec!["file-2", "file-5"]);
+    dir_should_not_contain(&fs_1, "", vec!["file-1", "file-3", "file-4"]);
+
+    // 1 -> 2 should thus propagate the deletion of file-3.
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_2, "", vec!["file-4", "file-5"]);
+    dir_should_not_contain(&fs_2, "", vec!["file-1", "file-2", "file-3"]);
+
+    // TODO: We still have a problematic state.
+    //       If we sync from 1 -> 3 multiple times, without ever syncing from 2 -> 3,
+    //       store 3 will never update its sync time of the folder, thus always try to re-fetch
+    //       data from store 1.
+    //       This is mostly about performance, thus we postpone it for now.
+    //       In the future, we need a scheme to partially update the parents sync time for
+    //       ignored items. However, this opens a whole new discussion on how to handle ignores, ...
+    //       The hard part about all these operations are implicit deletion notices.
+    //       We must NEVER increase the parent sync time without having all entries in it,
+    //       as a missing entry with a higher sync time creates an implicit deletion.
 }
 
 #[test]

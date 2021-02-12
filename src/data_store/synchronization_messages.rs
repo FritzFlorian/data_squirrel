@@ -78,6 +78,9 @@ pub struct ExtFileSyncContent {
 }
 pub struct ExtFolderSyncContent {
     pub last_mod_time: VersionVector<i64>,
+    // TODO: replace this with an on-demand loading or figure out some compression system if
+    //       we really want to handle many data stores in the architecture.
+    pub mod_time: VersionVector<i64>,
     pub creation_time: VersionVector<i64>,
 
     pub fs_metadata: ItemFSMetadata,
@@ -87,6 +90,8 @@ pub struct ExtIgnoreSyncContent {
     pub creation_time: VersionVector<i64>,
 
     pub last_mod_time: VersionVector<i64>,
+    // TODO: replace this with an on-demand loading or figure out some compression system if
+    //       we really want to handle many data stores in the architecture.
     pub mod_time: VersionVector<i64>,
 }
 
@@ -113,6 +118,7 @@ pub struct IntFileSyncContent {
 }
 pub struct IntFolderSyncContent {
     pub last_mod_time: VersionVector<i64>,
+    pub mod_time: VersionVector<i64>,
     pub creation_time: VersionVector<i64>,
 
     pub fs_metadata: ItemFSMetadata,
@@ -177,7 +183,9 @@ impl ExtSyncContent {
             }),
             Self::Folder(content) => IntSyncContent::Folder(IntFolderSyncContent {
                 last_mod_time: mapper.external_to_internal(&content.last_mod_time),
+                mod_time: mapper.external_to_internal(&content.mod_time),
                 creation_time: mapper.external_to_internal(&content.creation_time),
+
                 fs_metadata: content.fs_metadata,
                 child_items: content.child_items,
             }),
@@ -220,7 +228,9 @@ impl IntSyncContent {
             }),
             Self::Folder(content) => ExtSyncContent::Folder(ExtFolderSyncContent {
                 last_mod_time: content.last_mod_time,
+                mod_time: content.mod_time,
                 creation_time: content.creation_time,
+
                 fs_metadata: content.fs_metadata,
                 child_items: content.child_items,
             }),

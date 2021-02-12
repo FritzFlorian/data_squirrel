@@ -508,14 +508,16 @@ impl MetadataDB {
                     existing_item.item.file_type != FileType::DELETED && target_item.is_deletion();
                 let item_no_longer_folder =
                     existing_item.item.file_type == FileType::DIRECTORY && target_item.is_file();
+                let item_will_be_ignored =
+                    existing_item.item.file_type != FileType::IGNORED && target_item.is_ignored();
 
-                if item_will_be_deleted || item_no_longer_folder {
+                if item_will_be_deleted || item_no_longer_folder || item_will_be_ignored {
                     // In case a previous folder now is none-anymore, we need to clean out
                     // all its children from the DB (completely remove them).
                     self.delete_child_db_entries(&existing_item)?;
                 }
 
-                // Remove un-needed entries for deleted items.
+                // Remove un-needed metadata entries for deleted items.
                 if target_item.is_deletion() {
                     diesel::delete(
                         mod_metadatas::table.filter(mod_metadatas::id.eq(existing_item.item.id)),
@@ -562,18 +564,20 @@ impl MetadataDB {
 
             if !target_item.is_deletion() {
                 // FS Metadata can always be overwritten safely.
-                diesel::replace_into(file_system_metadatas::table)
-                    .values(file_system_metadata::InsertFull {
-                        id: item.id,
+                if !target_item.is_ignored() {
+                    diesel::replace_into(file_system_metadatas::table)
+                        .values(file_system_metadata::InsertFull {
+                            id: item.id,
 
-                        case_sensitive_name: &target_item.metadata().case_sensitive_name,
-                        creation_time: target_item.metadata().creation_time,
-                        mod_time: target_item.metadata().mod_time,
-                        hash: &target_item.metadata().hash,
+                            case_sensitive_name: &target_item.metadata().case_sensitive_name,
+                            creation_time: target_item.metadata().creation_time,
+                            mod_time: target_item.metadata().mod_time,
+                            hash: &target_item.metadata().hash,
 
-                        is_read_only: target_item.metadata().is_read_only,
-                    })
-                    .execute(&self.conn)?;
+                            is_read_only: target_item.metadata().is_read_only,
+                        })
+                        .execute(&self.conn)?;
+                }
 
                 // Mod Metadata is tricky, as we want to e.g. keep the mod_times associated with
                 // a folder.
@@ -614,11 +618,14 @@ impl MetadataDB {
             if !target_item.is_deletion() {
                 let fs_metadata = file_system_metadatas::table
                     .find(item.id)
-                    .first::<FileSystemMetadata>(&self.conn)?;
+                    .first::<FileSystemMetadata>(&self.conn)
+                    .optional()?;
                 let mod_metadata = mod_metadatas::table
                     .find(item.id)
-                    .first::<ModMetadata>(&self.conn)?;
+                    .first::<ModMetadata>(&self.conn)
+                    .optional()?;
 
+                let existing_item = existing_item.cloned();
                 if existing_item.is_some() && path_items.len() == 1 {
                     // Root item, do not touch item chain.
                 } else {
@@ -628,16 +635,29 @@ impl MetadataDB {
                     let new_item_internal = self.load_item(
                         path_component,
                         item,
-                        Some(fs_metadata),
-                        Some(mod_metadata),
+                        fs_metadata,
+                        mod_metadata,
                         &path_items.last().unwrap().sync_time.as_ref().unwrap(),
                     )?;
                     path_items.push(new_item_internal);
                 }
 
-                // Simply set the last_mod_time and let it bump the parent items mod times.
-                // We never directly sync the mod_times (max in folders), these should always be
-                // implicitly set by child items being updated.
+                // For mod times we want to add any new changes also to the parent items.
+                if target_item.is_folder() || target_item.is_ignored() {
+                    let target_mod_time = target_item.mod_time();
+                    let local_mod_time = existing_item
+                        .map(|item| item.mod_time.unwrap_or_else(VersionVector::new))
+                        .unwrap_or_else(VersionVector::new);
+                    for (target_store, target_time) in target_mod_time.iter() {
+                        if local_mod_time[&target_store] < *target_time {
+                            self.add_mod_event(
+                                &path_items,
+                                target_item.last_mod_store_id(),
+                                target_item.last_mod_store_time(),
+                            )?;
+                        }
+                    }
+                }
                 self.add_mod_event(
                     &path_items,
                     target_item.last_mod_store_id(),
@@ -844,8 +864,10 @@ impl MetadataDB {
     /// Loads the mod time vector stored in the DB for this item.
     /// For now this will be the full vector, but we might change this in later iterations.
     fn load_max_mod_time_for_folder(&self, data_item: &mut DBItemInternal) -> Result<()> {
-        if data_item.item.file_type != FileType::DIRECTORY {
-            // Skip the loading, makes only sense for folders that exist
+        if data_item.item.file_type == FileType::FILE
+            || data_item.item.file_type == FileType::DELETED
+        {
+            // Skip the loading, makes only sense for items that actually have entries.
         } else {
             let mod_time_entries: Vec<ModTime> = mod_times::table
                 .filter(mod_times::mod_metadata_id.eq(data_item.mod_metadata.as_ref().unwrap().id))
@@ -956,7 +978,9 @@ impl MetadataDB {
         );
 
         for path_item in path_items.iter().rev() {
-            if path_item.item.file_type == FileType::DIRECTORY {
+            if path_item.item.file_type == FileType::DIRECTORY
+                || path_item.item.file_type == FileType::IGNORED
+            {
                 let current_mod_time = mod_times::table
                     .select(mod_times::time)
                     .filter(

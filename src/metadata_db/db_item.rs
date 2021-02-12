@@ -173,6 +173,10 @@ impl DBItem {
         matches!(self.content, ItemType::DELETION { .. })
     }
 
+    pub fn is_ignored(&self) -> bool {
+        matches!(self.content, ItemType::IGNORED { .. })
+    }
+
     pub fn is_file(&self) -> bool {
         matches!(self.content, ItemType::FILE { .. })
     }
@@ -186,7 +190,7 @@ impl DBItem {
             ItemType::FILE { last_mod_time, .. } => last_mod_time,
             ItemType::FOLDER { last_mod_time, .. } => last_mod_time,
             ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
-            ItemType::IGNORED { .. } => panic!("Must not query mod_time of ignored item!"),
+            ItemType::IGNORED { last_mod_time, .. } => last_mod_time,
         }
     }
 
@@ -195,7 +199,7 @@ impl DBItem {
             ItemType::FILE { last_mod_time, .. } => last_mod_time,
             ItemType::FOLDER { mod_time, .. } => mod_time,
             ItemType::DELETION { .. } => panic!("Must not query mod_time of deletion notice!"),
-            ItemType::IGNORED { .. } => panic!("Must not query mod_time of ignored item!"),
+            ItemType::IGNORED { mod_time, .. } => mod_time,
         }
     }
 
@@ -204,7 +208,7 @@ impl DBItem {
             ItemType::FILE { creation_time, .. } => creation_time,
             ItemType::FOLDER { creation_time, .. } => creation_time,
             ItemType::DELETION { .. } => panic!("Must not query creation time of deletion notice!"),
-            ItemType::IGNORED { .. } => panic!("Must not query creation time of ignored item!"),
+            ItemType::IGNORED { creation_time, .. } => creation_time,
         }
     }
 
@@ -226,14 +230,16 @@ impl DBItem {
         match &self.content {
             ItemType::FILE { metadata, .. } => metadata,
             ItemType::FOLDER { metadata, .. } => metadata,
-            _ => panic!("Must not query metadata of deletion notice!"),
+            ItemType::DELETION => panic!("Must not query metadata of deletion notice!"),
+            ItemType::IGNORED { .. } => panic!("Must not query metadata of ignored item!"),
         }
     }
     pub fn metadata_mut(&mut self) -> &mut ItemFSMetadata {
         match &mut self.content {
             ItemType::FILE { metadata, .. } => metadata,
             ItemType::FOLDER { metadata, .. } => metadata,
-            _ => panic!("Must not query metadata of deletion notice!"),
+            ItemType::DELETION => panic!("Must not query metadata of deletion notice!"),
+            ItemType::IGNORED { .. } => panic!("Must not query metadata of ignored item!"),
         }
     }
 }

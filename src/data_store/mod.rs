@@ -277,9 +277,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }),
                 metadata_db::ItemType::FOLDER {
                     last_mod_time: local_last_mod_time,
+                    mod_time: local_mod_time,
                     metadata: local_metadata,
                     creation_time: local_creation_time,
-                    ..
                 } => {
                     let child_item_names = self
                         .db_access
@@ -293,6 +293,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         action: IntSyncAction::UpdateRequired(IntSyncContent::Folder(
                             IntFolderSyncContent {
                                 last_mod_time: local_last_mod_time,
+                                mod_time: local_mod_time,
                                 creation_time: local_creation_time,
                                 fs_metadata: local_metadata,
                                 child_items: child_item_names,
@@ -329,7 +330,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let (local_mapper, remote_mapper) = self.sync_data_store_lists(&from_other)?;
 
         // Perform Actual Synchronization
-        self.sync_from_other_store_recursive(&from_other, &path, &local_mapper, &remote_mapper)
+        self.sync_from_other_store_recursive(&from_other, &path, &local_mapper, &remote_mapper)?;
+        Ok(())
     }
 
     fn sync_data_store_lists(
@@ -361,7 +363,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         path: &RelativePath,
         local_mapper: &DataStoreIDMapper,
         remote_mapper: &DataStoreIDMapper,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // STEP 1) Perform the synchronization request to the other data_store.
         let local_item = self.db_access.get_local_data_item(&path, true)?;
         let localized_path = path
@@ -387,6 +389,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 target_item.sync_time.max(&sync_response.sync_time);
                 self.db_access
                     .sync_local_data_item(&localized_path, &target_item)?;
+
+                Ok(true)
             }
             IntSyncAction::UpdateRequired(sync_content) => {
                 if !self.does_disk_item_match_db_item(&local_item, true)? {
@@ -394,49 +398,39 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }
 
                 match sync_content {
-                    IntSyncContent::Deletion(content) => {
-                        self.sync_deletion(
-                            &from_other,
-                            local_item,
-                            localized_path,
-                            sync_response.sync_time,
-                            content,
-                        )?;
-                    }
-                    IntSyncContent::File(content) => {
-                        self.sync_file(
-                            &from_other,
-                            local_item,
-                            localized_path,
-                            sync_response.sync_time,
-                            content,
-                        )?;
-                    }
-                    IntSyncContent::Folder(content) => {
-                        self.sync_folder(
-                            &from_other,
-                            local_item,
-                            localized_path,
-                            sync_response.sync_time,
-                            content,
-                            &local_mapper,
-                            &remote_mapper,
-                        )?;
-                    }
-                    IntSyncContent::Ignore(content) => {
-                        self.sync_ignored(
-                            &from_other,
-                            local_item,
-                            localized_path,
-                            sync_response.sync_time,
-                            content,
-                        )?;
-                    }
+                    IntSyncContent::Deletion(content) => self.sync_deletion(
+                        &from_other,
+                        local_item,
+                        localized_path,
+                        sync_response.sync_time,
+                        content,
+                    ),
+                    IntSyncContent::File(content) => self.sync_file(
+                        &from_other,
+                        local_item,
+                        localized_path,
+                        sync_response.sync_time,
+                        content,
+                    ),
+                    IntSyncContent::Folder(content) => self.sync_folder(
+                        &from_other,
+                        local_item,
+                        localized_path,
+                        sync_response.sync_time,
+                        content,
+                        &local_mapper,
+                        &remote_mapper,
+                    ),
+                    IntSyncContent::Ignore(content) => self.sync_ignored(
+                        &from_other,
+                        local_item,
+                        localized_path,
+                        sync_response.sync_time,
+                        content,
+                    ),
                 }
             }
         }
-
-        Ok(())
     }
 
     fn sync_folder(
@@ -448,7 +442,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         sync_content: IntFolderSyncContent,
         local_mapper: &DataStoreIDMapper,
         remote_mapper: &DataStoreIDMapper,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let remote_path = localized_path
             .parent()
             .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
@@ -466,13 +460,22 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
         }
 
-        // FIXME: SyncIgnored
-        // If our local item is currently a deletion and the remote item would create it locally,
-        // check if the remote path is on our ignore glob list.
-        // If so, enter the item ONLY into our DB and immideatly ignore it.
-        // FIXME: SyncIgnored
-        // If our local item is currently ignored in the db update it with the new mod/sync
-        // information from the remote.
+        // We want to ignore the folder, but still add its metadata to the db.
+        if local_item.is_ignored() || self.fs_access.is_ignored(&localized_path.to_lower_case()) {
+            let target_item = metadata_db::DBItem {
+                path: localized_path.clone(),
+                sync_time: sync_time,
+                content: metadata_db::ItemType::IGNORED {
+                    creation_time: sync_content.creation_time,
+                    last_mod_time: sync_content.last_mod_time.clone(),
+                    mod_time: sync_content.mod_time,
+                },
+            };
+            self.db_access
+                .sync_local_data_item(&localized_path, &target_item)?;
+
+            return Ok(true);
+        }
 
         // Make sure the folder exists.
         // In case it was a file before, it is going to be deleted.
@@ -508,16 +511,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         // Recurse into items present on the other store...
+        let mut all_children_synced = true;
         let mut visited_items = HashSet::with_capacity(sync_content.child_items.len());
         for remote_child_item in sync_content.child_items {
             visited_items.insert(remote_child_item.to_lowercase());
 
-            self.sync_from_other_store_recursive(
-                &from_other,
-                &localized_path.join(remote_child_item),
-                &local_mapper,
-                &remote_mapper,
-            )?;
+            all_children_synced = all_children_synced
+                && self.sync_from_other_store_recursive(
+                    &from_other,
+                    &localized_path.join(remote_child_item),
+                    &local_mapper,
+                    &remote_mapper,
+                )?;
         }
         // ...and also into local items (these should simply get deleted,
         // but we can optimize this later on after the basic works).
@@ -526,12 +531,13 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .get_local_child_items(&localized_path, true)?
         {
             if !visited_items.contains(&local_child.path.name().to_lowercase()) {
-                self.sync_from_other_store_recursive(
-                    &from_other,
-                    &local_child.path,
-                    &local_mapper,
-                    &remote_mapper,
-                )?;
+                all_children_synced = all_children_synced
+                    && self.sync_from_other_store_recursive(
+                        &from_other,
+                        &local_child.path,
+                        &local_mapper,
+                        &remote_mapper,
+                    )?;
             }
         }
 
@@ -552,7 +558,16 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         )?;
         let folder_after_sync = metadata_db::DBItem {
             path: remote_path,
-            sync_time: sync_time,
+            // TODO: We are very conservative here. If we can not sync EVERY SINGLE child element,
+            //       we do not push our sync time. This is especially problematic with ignored
+            //       elements. However, as long as you mostly keep your system in sync, this
+            //       always converges to eventually update the sync time.
+            //       If it becomes a performance issue in the future, get more sophisticated here.
+            sync_time: if all_children_synced {
+                sync_time
+            } else {
+                local_item.sync_time
+            },
             content: metadata_db::ItemType::FOLDER {
                 metadata: sync_content.fs_metadata,
                 creation_time: sync_content.creation_time,
@@ -563,7 +578,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         self.db_access
             .sync_local_data_item(&localized_path, &folder_after_sync)?;
 
-        Ok(())
+        Ok(true)
     }
 
     fn sync_file(
@@ -573,7 +588,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         localized_path: RelativePath,
         sync_time: VersionVector<i64>,
         sync_content: IntFileSyncContent,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let remote_path = localized_path
             .parent()
             .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
@@ -591,15 +606,24 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
         }
 
-        // FIXME: SyncIgnored
-        // If our local item is currently a deletion and the remote item would create it locally,
-        // check if the remote path is on our ignore glob list.
-        // If so, enter the item ONLY into our DB and immideatly ignore it.
-        // FIXME: SyncIgnored
-        // If our local item is currently ignored in the db update it with the new mod/sync
-        // information from the remote.
+        // We want to ignore the file, but still add its metadata to the db.
+        if local_item.is_ignored() || self.fs_access.is_ignored(&localized_path.to_lower_case()) {
+            let target_item = metadata_db::DBItem {
+                path: localized_path.clone(),
+                sync_time: sync_time,
+                content: metadata_db::ItemType::IGNORED {
+                    creation_time: sync_content.creation_time,
+                    last_mod_time: sync_content.last_mod_time.clone(),
+                    mod_time: sync_content.last_mod_time,
+                },
+            };
+            self.db_access
+                .sync_local_data_item(&localized_path, &target_item)?;
 
-        // ...download file.
+            return Ok(true);
+        }
+
+        // For non ignored content, download the file.
         let tmp_file_path = self.download_file(&from_other, &localized_path)?;
         self.fs_access.set_metadata(
             &tmp_file_path,
@@ -638,7 +662,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         self.db_access
             .sync_local_data_item(&localized_path, &target_item)?;
 
-        Ok(())
+        Ok(true)
     }
 
     fn sync_deletion(
@@ -648,13 +672,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         localized_path: RelativePath,
         sync_time: VersionVector<i64>,
         _sync_content: IntDeletionSyncContent,
-    ) -> Result<()> {
-        // FIXME: SyncIgnored
-        // If our local item is currently ignored in the db and the remote has a 'newer' deletion
-        // to offer, remove our local ignore entry.
-        // (Note: this strongly advises FOR the case that we just 'plain ignore' local items
-        // that match our ignore glob patterns).
-
+    ) -> Result<bool> {
         if local_item.is_deletion() {
             // Both agree that the file should be deleted. Ignore any potential
             // conflicts, just settle and be happy that we agree on the state.
@@ -662,12 +680,16 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             target_item.sync_time.max(&sync_time);
             self.db_access
                 .sync_local_data_item(&localized_path, &target_item)?;
+
+            Ok(true)
         } else if local_item.creation_time() <= &sync_time {
             // The remote deletion notice is targeting our local file/folder.
             if local_item.mod_time() <= &sync_time {
                 // The remote deletion notice knows of all our changes.
                 // Delete the actual item on disk...
-                if local_item.is_file() {
+                if local_item.is_ignored() {
+                    // Nothing to do on disk, pure metadata operation.
+                } else if local_item.is_file() {
                     self.fs_access.delete_file(&localized_path)?;
                 } else {
                     self.fs_access.delete_directory(&localized_path)?;
@@ -682,8 +704,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 };
                 self.db_access
                     .sync_local_data_item(&localized_path, &target_item)?;
+
+                Ok(true)
             } else {
-                panic!("Detected sync-conflict!");
+                // We have a conflict. The remote wants to delete an item that our local DB
+                // has more recent changes for.
+                if local_item.is_ignored() {
+                    // ...while it would be a conflict, we can just skip to sync the item to avoid
+                    // any issues or user intervention.
+                    Ok(false)
+                } else {
+                    panic!("Detected sync-conflict!");
+                }
             }
         } else {
             // The deletion notice does not 'target' our file, i.e. it does
@@ -694,26 +726,41 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             target_item.sync_time.max(&sync_time);
             self.db_access
                 .sync_local_data_item(&localized_path, &target_item)?;
-        }
 
-        Ok(())
+            Ok(true)
+        }
     }
 
     fn sync_ignored(
         &self,
         _from_other: &Self,
-        _local_item: DBItem,
-        _localized_path: RelativePath,
-        _sync_time: VersionVector<i64>,
-        _sync_content: IntIgnoreSyncContent,
-    ) -> Result<()> {
-        // FIXME: SyncIgnored
-        // If our local item is also ignored, we can take the remote data and proceed with
-        // the sync as planned.
-        // If our local item is NOT ignored, we can not really use the information about an
-        // ignored item that is more up-to-date than our local copy.
-        // Report that the sync CAN NOT update the parent items sync time.
-        panic!("We do currently not handle incoming ignored items when syncing!");
+        local_item: DBItem,
+        localized_path: RelativePath,
+        sync_time: VersionVector<i64>,
+        sync_content: IntIgnoreSyncContent,
+    ) -> Result<bool> {
+        if local_item.is_ignored() {
+            // If our local item is also ignored, we can take the remote data and proceed with
+            // the sync as planned.
+            let target_item = metadata_db::DBItem {
+                path: localized_path.clone(),
+                sync_time: sync_time,
+                content: metadata_db::ItemType::IGNORED {
+                    creation_time: sync_content.creation_time,
+                    last_mod_time: sync_content.last_mod_time.clone(),
+                    mod_time: sync_content.mod_time,
+                },
+            };
+            self.db_access
+                .sync_local_data_item(&localized_path, &target_item)?;
+
+            Ok(true)
+        } else {
+            // If our local item is NOT ignored, we can not really use the information about an
+            // ignored item that is more up-to-date than our local copy.
+            // Report that the sync CAN NOT update the parent items sync time.
+            Ok(false)
+        }
     }
 
     ///////////////////////////////////
@@ -763,6 +810,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     fn does_disk_item_match_db_item(&self, db_item: &DBItem, check_folder: bool) -> Result<bool> {
         // Root directory is always fine.
         if db_item.path.path_component_number() <= 1 {
+            return Ok(true);
+        }
+        // We ignore the item, the disk can contain anything.
+        if db_item.is_ignored() {
             return Ok(true);
         }
 
