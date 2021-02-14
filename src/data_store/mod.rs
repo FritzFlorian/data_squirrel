@@ -16,9 +16,12 @@ mod scan_result;
 pub use self::scan_result::ScanResult;
 mod scan_event;
 pub use self::scan_event::*;
+mod sync_conflict_event;
+pub use self::sync_conflict_event::*;
 mod errors;
 pub use self::errors::*;
 use data_store::ScanEvent::DeletedItem;
+use data_store::SyncConflictEvent::*;
 use fs_interaction::DataItem;
 use metadata_db::{DBItem, ItemFSMetadata};
 
@@ -322,15 +325,57 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
     }
 
+    pub fn sync_from_other_store_panic_conflicts(
+        &self,
+        from_other: &Self,
+        path: &RelativePath,
+    ) -> Result<()> {
+        use self::SyncConflictEvent::*;
+
+        self.sync_from_other_store(&from_other, &path, &mut |conflict| {
+            match conflict {
+                LocalDeletionRemoteFolder(_, _) => panic!(
+                    "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
+                ),
+                LocalFileRemoteFolder(_, _) => panic!(
+                    "Detected sync-conflict: Remote has changed an item concurrently to this data store!"
+                ),
+                LocalDeletionRemoteFile(_, _) => panic!(
+                    "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
+                ),
+                LocalFileRemoteFile(_, _) => panic!(
+                    "Detected sync-conflict: Remote has changed an item concurrently to this data store!"
+                ),
+                LocalFileRemoteDeletion(_, _) => panic!(
+                    "Detected sync-conflict: Remote has deleted an item concurrently that we made changes to!"
+                ),
+            }
+        })
+    }
+
     // Synchronizes in the direction from_other -> self, i.e. self will contain all changes done
     // in from_other after the operation completes successfully.
-    pub fn sync_from_other_store(&self, from_other: &Self, path: &RelativePath) -> Result<()> {
+    pub fn sync_from_other_store<F>(
+        &self,
+        from_other: &Self,
+        path: &RelativePath,
+        sync_conflict: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
+    {
         // Step 0) Handshake so both stores know about the same data_stores and can map their
         //         data base ID's to each others local view.
         let (local_mapper, remote_mapper) = self.sync_data_store_lists(&from_other)?;
 
         // Perform Actual Synchronization
-        self.sync_from_other_store_recursive(&from_other, &path, &local_mapper, &remote_mapper)?;
+        self.sync_from_other_store_recursive(
+            &from_other,
+            &path,
+            &local_mapper,
+            &remote_mapper,
+            sync_conflict,
+        )?;
         Ok(())
     }
 
@@ -357,13 +402,17 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok((local_mapper, remote_mapper))
     }
 
-    fn sync_from_other_store_recursive(
+    fn sync_from_other_store_recursive<F>(
         &self,
         from_other: &Self,
         path: &RelativePath,
         local_mapper: &DataStoreIDMapper,
         remote_mapper: &DataStoreIDMapper,
-    ) -> Result<bool> {
+        sync_conflict: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
+    {
         // STEP 1) Perform the synchronization request to the other data_store.
         let local_item = self.db_access.get_local_data_item(&path, true)?;
         let localized_path = path
@@ -385,11 +434,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             IntSyncAction::UpToDate => {
                 // If we are up-to-date it is rather simple, we integrate the knowledge that
                 // of the other device on 'how up to date' the directory is and we are done.
-                let mut target_item = local_item;
-                target_item.sync_time.max(&sync_response.sync_time);
-                self.db_access
-                    .sync_local_data_item(&localized_path, &target_item)?;
-
+                self.increase_item_sync_time(local_item, sync_response.sync_time)?;
                 Ok(true)
             }
             IntSyncAction::UpdateRequired(sync_content) => {
@@ -404,6 +449,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         localized_path,
                         sync_response.sync_time,
                         content,
+                        sync_conflict,
                     ),
                     IntSyncContent::File(content) => self.sync_file(
                         &from_other,
@@ -411,6 +457,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         localized_path,
                         sync_response.sync_time,
                         content,
+                        sync_conflict,
                     ),
                     IntSyncContent::Folder(content) => self.sync_folder(
                         &from_other,
@@ -420,6 +467,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         content,
                         &local_mapper,
                         &remote_mapper,
+                        sync_conflict,
                     ),
                     IntSyncContent::Ignore(content) => self.sync_ignored(
                         &from_other,
@@ -427,13 +475,23 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         localized_path,
                         sync_response.sync_time,
                         content,
+                        sync_conflict,
                     ),
                 }
             }
         }
     }
 
-    fn sync_folder(
+    fn increase_item_sync_time(&self, item: DBItem, sync_time: VersionVector<i64>) -> Result<()> {
+        let mut target_item = item;
+        target_item.sync_time.max(&sync_time);
+        self.db_access
+            .sync_local_data_item(&target_item.path, &target_item)?;
+
+        Ok(())
+    }
+
+    fn sync_folder<F>(
         &self,
         from_other: &Self,
         local_item: DBItem,
@@ -442,7 +500,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         sync_content: IntFolderSyncContent,
         local_mapper: &DataStoreIDMapper,
         remote_mapper: &DataStoreIDMapper,
-    ) -> Result<bool> {
+        sync_conflict: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
+    {
         let remote_path = localized_path
             .parent()
             .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
@@ -450,14 +512,34 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         if local_item.is_deletion() && sync_content.creation_time <= local_item.sync_time {
             // We know of the other file in our history and have deleted it.
             // At the same time there is new data for this item on the remote...
-            panic!(
-                "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
-            );
+            match sync_conflict(LocalDeletionRemoteFolder(&local_item, &sync_content)) {
+                SyncConflictResolution::ChooseLocalItem => {
+                    self.increase_item_sync_time(local_item, sync_time)?;
+                    return Ok(true);
+                }
+                SyncConflictResolution::ChooseRemoteItem => {
+                    // Do nothing, the 'normal' sync procedure will do.
+                }
+                SyncConflictResolution::DoNotResolve => {
+                    return Ok(false);
+                }
+            }
         }
         if local_item.is_file() && !(local_item.mod_time() <= &sync_time) {
             // The remote has a new change, but does not know everything about
             // our local changes...
-            panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
+            match sync_conflict(LocalFileRemoteFolder(&local_item, &sync_content)) {
+                SyncConflictResolution::ChooseLocalItem => {
+                    self.increase_item_sync_time(local_item, sync_time)?;
+                    return Ok(true);
+                }
+                SyncConflictResolution::ChooseRemoteItem => {
+                    // Do nothing, the 'normal' sync procedure will do.
+                }
+                SyncConflictResolution::DoNotResolve => {
+                    return Ok(false);
+                }
+            }
         }
 
         // We want to ignore the folder, but still add its metadata to the db.
@@ -522,6 +604,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     &localized_path.join(remote_child_item),
                     &local_mapper,
                     &remote_mapper,
+                    sync_conflict,
                 )?;
         }
         // ...and also into local items (these should simply get deleted,
@@ -537,6 +620,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         &local_child.path,
                         &local_mapper,
                         &remote_mapper,
+                        sync_conflict,
                     )?;
             }
         }
@@ -581,14 +665,18 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(true)
     }
 
-    fn sync_file(
+    fn sync_file<F>(
         &self,
         from_other: &Self,
         local_item: DBItem,
         localized_path: RelativePath,
         sync_time: VersionVector<i64>,
         sync_content: IntFileSyncContent,
-    ) -> Result<bool> {
+        sync_conflict: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
+    {
         let remote_path = localized_path
             .parent()
             .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
@@ -596,14 +684,43 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         if local_item.is_deletion() && sync_content.creation_time <= local_item.sync_time {
             // We know of the other file in our history and have deleted it.
             // At the same time there is new data for this item on the remote...
-            panic!(
-                "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
-            );
+            if local_item.sync_time <= sync_time {
+                // TODO: Fully work through examples on paper if this never results in
+                //       issues with more than 2 stores involved.
+                // The remote's sync time dominates our local sync time.
+                // This is an interesting special case, where the remote saw our wish to delete
+                // the file but had own, local changes. The remote then decided to keep the file.
+                // We want to get the file back from the remote.
+            } else {
+                match sync_conflict(LocalDeletionRemoteFile(&local_item, &sync_content)) {
+                    SyncConflictResolution::ChooseLocalItem => {
+                        self.increase_item_sync_time(local_item, sync_time)?;
+                        return Ok(true);
+                    }
+                    SyncConflictResolution::ChooseRemoteItem => {
+                        // Do nothing, the 'normal' sync procedure will do.
+                    }
+                    SyncConflictResolution::DoNotResolve => {
+                        return Ok(false);
+                    }
+                }
+            }
         }
         if !local_item.is_deletion() && !(local_item.mod_time() <= &sync_time) {
             // The remote has a new change, but does not know everything about
             // our local changes...
-            panic!("Detected sync-conflict: Remote has changed an item concurrently to this data store!");
+            match sync_conflict(LocalFileRemoteFile(&local_item, &sync_content)) {
+                SyncConflictResolution::ChooseLocalItem => {
+                    self.increase_item_sync_time(local_item, sync_time)?;
+                    return Ok(true);
+                }
+                SyncConflictResolution::ChooseRemoteItem => {
+                    // Do nothing, the 'normal' sync procedure will do.
+                }
+                SyncConflictResolution::DoNotResolve => {
+                    return Ok(false);
+                }
+            }
         }
 
         // We want to ignore the file, but still add its metadata to the db.
@@ -641,9 +758,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 self.fs_access.delete_directory(&localized_path)?
             }
             metadata_db::ItemType::DELETION { .. } => (), // Nothing to do
-            metadata_db::ItemType::IGNORED { .. } => {
-                panic!("Sync not yet implemented for ignored items!")
-            }
+            metadata_db::ItemType::IGNORED { .. } => (),  // Nothing to do
         }
         // ... move the downloaded file over it.
         self.fs_access
@@ -665,80 +780,94 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         Ok(true)
     }
 
-    fn sync_deletion(
+    fn sync_deletion<F>(
         &self,
         _from_other: &Self,
         local_item: DBItem,
         localized_path: RelativePath,
         sync_time: VersionVector<i64>,
-        _sync_content: IntDeletionSyncContent,
-    ) -> Result<bool> {
+        sync_content: IntDeletionSyncContent,
+        sync_conflict: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
+    {
         if local_item.is_deletion() {
             // Both agree that the file should be deleted. Ignore any potential
             // conflicts, just settle and be happy that we agree on the state.
-            let mut target_item = local_item;
-            target_item.sync_time.max(&sync_time);
+            self.increase_item_sync_time(local_item, sync_time)?;
+            Ok(true)
+        } else if local_item.creation_time() <= &sync_time {
+            // The remote deletion notice is targeting our local file/folder.
+            if !(local_item.mod_time() <= &sync_time) {
+                // We have a conflict. The remote wants to delete an item that our local DB
+                // has more recent changes for...
+                if local_item.is_ignored() {
+                    // ...while it would be a conflict, we can just skip to sync the item to avoid
+                    // any issues or user intervention.
+                    return Ok(false);
+                } else {
+                    // ...we actually have a real conflict. Try to resolve it.
+                    match sync_conflict(LocalFileRemoteDeletion(&local_item, &sync_content)) {
+                        SyncConflictResolution::ChooseLocalItem => {
+                            self.increase_item_sync_time(local_item, sync_time)?;
+                            return Ok(true);
+                        }
+                        SyncConflictResolution::ChooseRemoteItem => {
+                            // Do nothing, the 'normal' sync procedure will do.
+                        }
+                        SyncConflictResolution::DoNotResolve => {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                // The remote deletion notice knows of all our changes.
+            }
+
+            // ...we decided to choose the remote deletion notice to overwrite our local item.
+            // Delete our local item on disk...
+            if local_item.is_ignored() {
+                // Nothing to do on disk, pure metadata operation.
+            } else if local_item.is_file() {
+                self.fs_access.delete_file(&localized_path)?;
+            } else {
+                self.fs_access.delete_directory(&localized_path)?;
+            }
+
+            // ...and insert the appropriate deletion notice into our local db.
+            let target_item = metadata_db::DBItem {
+                path: localized_path.clone(),
+                sync_time: sync_time.clone(),
+
+                content: metadata_db::ItemType::DELETION,
+            };
             self.db_access
                 .sync_local_data_item(&localized_path, &target_item)?;
 
             Ok(true)
-        } else if local_item.creation_time() <= &sync_time {
-            // The remote deletion notice is targeting our local file/folder.
-            if local_item.mod_time() <= &sync_time {
-                // The remote deletion notice knows of all our changes.
-                // Delete the actual item on disk...
-                if local_item.is_ignored() {
-                    // Nothing to do on disk, pure metadata operation.
-                } else if local_item.is_file() {
-                    self.fs_access.delete_file(&localized_path)?;
-                } else {
-                    self.fs_access.delete_directory(&localized_path)?;
-                }
-
-                // ...and insert the appropriate deletion notice into our local db.
-                let target_item = metadata_db::DBItem {
-                    path: localized_path.clone(),
-                    sync_time: sync_time.clone(),
-
-                    content: metadata_db::ItemType::DELETION,
-                };
-                self.db_access
-                    .sync_local_data_item(&localized_path, &target_item)?;
-
-                Ok(true)
-            } else {
-                // We have a conflict. The remote wants to delete an item that our local DB
-                // has more recent changes for.
-                if local_item.is_ignored() {
-                    // ...while it would be a conflict, we can just skip to sync the item to avoid
-                    // any issues or user intervention.
-                    Ok(false)
-                } else {
-                    panic!("Detected sync-conflict!");
-                }
-            }
         } else {
             // The deletion notice does not 'target' our file, i.e. it does
             // not know about our local file, as the local file was created
             // logically independent of the other copy.
             // Just do nothing more than take up the target sync time.
-            let mut target_item = local_item;
-            target_item.sync_time.max(&sync_time);
-            self.db_access
-                .sync_local_data_item(&localized_path, &target_item)?;
-
+            self.increase_item_sync_time(local_item, sync_time)?;
             Ok(true)
         }
     }
 
-    fn sync_ignored(
+    fn sync_ignored<F>(
         &self,
         _from_other: &Self,
         local_item: DBItem,
         localized_path: RelativePath,
         sync_time: VersionVector<i64>,
         sync_content: IntIgnoreSyncContent,
-    ) -> Result<bool> {
+        _sync_conflict: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
+    {
         if local_item.is_ignored() {
             // If our local item is also ignored, we can take the remote data and proceed with
             // the sync as planned.

@@ -73,9 +73,8 @@ fn scan_data_store_directory() {
     // Detect new and changed files
     in_memory_fs.create_file("file-3").unwrap();
     in_memory_fs
-        .test_set_file_content("file-1", Vec::from("hello"))
+        .test_set_file_content("file-1", "hello", true)
         .unwrap();
-    in_memory_fs.test_increase_file_mod_time("file-1").unwrap();
 
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
@@ -295,7 +294,7 @@ fn unidirectional_sync() {
     data_store_1.perform_full_scan().unwrap();
     data_store_2.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // We should have the files on the second store
@@ -312,10 +311,8 @@ fn unidirectional_sync() {
     );
 
     // Lets do some non-conflicting changes in both stores
-    fs_2.test_set_file_content("file-2", "testing".to_owned().into_bytes())
+    fs_2.test_set_file_content("file-2", "testing", true)
         .unwrap();
-    fs_2.test_increase_file_mod_time("file-2").unwrap();
-
     fs_1.create_file("file-3").unwrap();
     fs_1.remove_file("file-1").unwrap();
 
@@ -323,10 +320,10 @@ fn unidirectional_sync() {
     data_store_1.perform_full_scan().unwrap();
     data_store_2.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
     data_store_1
-        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
         .unwrap();
 
     // The contents should now match without any conflicts
@@ -340,7 +337,7 @@ fn unidirectional_sync() {
 
     data_store_1.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     let other_metadata = fs_2.metadata("file-2").unwrap();
@@ -364,7 +361,7 @@ fn panics_when_trying_to_sync_without_index_1() {
     // Rename item on receiving data store after scan operation
     fs_2.rename("file-1", "FILE-1").unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 }
 
@@ -385,7 +382,7 @@ fn panics_when_trying_to_sync_without_index_2() {
     // Delete item on receiving data store after scan operation
     fs_2.remove_file("file-1").unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 }
 
@@ -406,7 +403,7 @@ fn panics_when_trying_to_sync_without_index_3() {
     // Delete item on sending data store after scan operation
     fs_1.remove_file("file-1").unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 }
 
@@ -425,10 +422,9 @@ fn panics_when_trying_to_sync_without_index_4() {
     data_store_1.perform_full_scan().unwrap();
     data_store_2.perform_full_scan().unwrap();
     // Modify item on sending data store after scan operation
-    fs_1.test_set_file_content("file-1", b"test".to_vec())
-        .unwrap();
+    fs_1.test_set_file_content("file-1", "test", true).unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 }
 
@@ -457,7 +453,7 @@ fn metadata_set_correctly_after_sync() {
     // ..give some time for the time stamps of the newly created file to be different.
     sleep(Duration::from_millis(10));
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // A scan on store 2 should now NOT result in any changes
@@ -496,7 +492,7 @@ fn can_sync_read_only_files() {
 
     data_store_1.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // Now change it's content and try to sync it again.
@@ -510,7 +506,7 @@ fn can_sync_read_only_files() {
 
     data_store_1.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // We expect the target content to have changed but still be a read-only file.
@@ -534,7 +530,7 @@ fn sync_changes_in_file_name_case() {
     data_store_1.perform_full_scan().unwrap();
     data_store_2.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // Change the case of files in the local data store
@@ -542,15 +538,14 @@ fn sync_changes_in_file_name_case() {
     fs_1.rename("file-1", "File-1").unwrap();
     fs_1.rename("SUB-1/file-1", "SUB-1/FILE-1").unwrap();
     // ...also mix in some file contents.
-    fs_1.test_set_file_content("File-1", b"hello there!".to_vec())
+    fs_1.test_set_file_content("File-1", "hello there!", true)
         .unwrap();
-    fs_1.test_increase_file_mod_time("File-1").unwrap();
 
     // Index it and sync it to the remote data store
     data_store_1.perform_full_scan().unwrap();
     data_store_2.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // We expect the case changes to be propagated
@@ -570,7 +565,7 @@ fn sync_changes_in_file_name_case() {
     data_store_1.perform_full_scan().unwrap();
     data_store_2.perform_full_scan().unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
 
     // We expect the case changes to be propagated
@@ -599,13 +594,13 @@ fn multi_target_sync() {
 
     // Sync from 1 to 3...
     data_store_3
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_3, "", vec!["sub-1"]);
     dir_should_contain(&fs_3, "sub-1", vec!["file-1"]);
     // ...then from 3 to 2 (so effectively from 1 to 2)
     data_store_2
-        .sync_from_other_store(&data_store_3, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_3, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_2, "", vec!["sub-1", "sub-2"]);
     dir_should_contain(&fs_2, "sub-1", vec!["file-1"]);
@@ -613,7 +608,7 @@ fn multi_target_sync() {
 
     // Finally, finish the sync-circle (from 2 to 1)
     data_store_1
-        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_1, "", vec!["sub-1", "sub-2"]);
     dir_should_contain(&fs_1, "sub-1", vec!["file-1"]);
@@ -631,10 +626,10 @@ fn multi_target_sync() {
 
     // Get all changes to store 3
     data_store_3
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
     data_store_3
-        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_3, "", vec!["sub-1", "sub-2"]);
     dir_should_contain(&fs_3, "sub-1", vec!["file-2"]);
@@ -647,7 +642,7 @@ fn multi_target_sync() {
 
     // Sync back (we expect to have all changes from store 2 and the file-1 still exists)
     data_store_3
-        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_3, "", vec!["sub-1", "sub-2"]);
     dir_should_contain(&fs_3, "sub-1", vec!["file-2", "file-1"]);
@@ -680,10 +675,10 @@ fn multi_target_sync_with_ignores() {
     // Syncing 1 and 2 up should leave both with only their initial data, but ignore notices about
     // the other stores data.
     data_store_1
-        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
         .unwrap();
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
     dir_should_not_contain(&fs_1, "", vec!["file-3", "file-4"]);
     dir_should_not_contain(&fs_2, "", vec!["file-1", "file-2"]);
@@ -693,11 +688,11 @@ fn multi_target_sync_with_ignores() {
     // as it can not provide the ignored files. The sync algorithm must be sure to NOT update
     // the parent sync time at this point, as this could prevent a future sync from 1 -> 3.
     data_store_3
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_3, "", vec!["file-1", "file-2"]);
     data_store_3
-        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_3, "", vec!["file-1", "file-2", "file-3", "file-4"]);
 
@@ -709,14 +704,14 @@ fn multi_target_sync_with_ignores() {
 
     // 3 -> 1 should propagate ALL changes (also deletion of file-3).
     data_store_1
-        .sync_from_other_store(&data_store_3, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_3, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_1, "", vec!["file-2", "file-5"]);
     dir_should_not_contain(&fs_1, "", vec!["file-1", "file-3", "file-4"]);
 
     // 1 -> 2 should thus propagate the deletion of file-3.
     data_store_2
-        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
         .unwrap();
     dir_should_contain(&fs_2, "", vec!["file-4", "file-5"]);
     dir_should_not_contain(&fs_2, "", vec!["file-1", "file-2", "file-3"]);
@@ -731,6 +726,239 @@ fn multi_target_sync_with_ignores() {
     //       The hard part about all these operations are implicit deletion notices.
     //       We must NEVER increase the parent sync time without having all entries in it,
     //       as a missing entry with a higher sync time creates an implicit deletion.
+}
+
+fn create_synced_base_state() -> (
+    (InMemoryFS, DataStore<InMemoryFS>),
+    (InMemoryFS, DataStore<InMemoryFS>),
+) {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    fs_1.create_file("file-1").unwrap();
+    fs_1.test_set_file_content("file-1", "start", true).unwrap();
+
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    ((fs_1, data_store_1), (fs_2, data_store_2))
+}
+
+// CASE 1: Two different, concurrently changed file versions on both data stores.
+//         Choose the remote item.
+#[test]
+fn sync_with_conflicts_1() {
+    let ((fs_1, data_store_1), (fs_2, data_store_2)) = create_synced_base_state();
+
+    // Two independent changes -> this should result in conflict on sync
+    fs_1.test_set_file_content("file-1", "fs_1", true).unwrap();
+    fs_2.test_set_file_content("file-1", "fs_2", true).unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync from 1 -> 2. No resolution, nothing should happen.
+    let mut conflict_happened = false;
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalFileRemoteFile(_, _));
+            SyncConflictResolution::DoNotResolve
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_2.test_get_file_content("file-1").unwrap(), "fs_2");
+
+    // Sync from 1 -> 2. Resolution, we should choose the remote item now.
+    let mut conflict_happened = false;
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalFileRemoteFile(_, _));
+            SyncConflictResolution::ChooseRemoteItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_2.test_get_file_content("file-1").unwrap(), "fs_1");
+
+    // A second sync SHOULD NOT be a conflict.
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+
+    // FIXME: Have a look at the paper and my notes tomorrow to see if this semantic is what we want.
+    //        Intuitively I would say yes, but I want to double check when I am more focused.
+    // Sync from 2 -> 1 should result in 2 propagating the its choice of keeping the fs_1 version.
+    data_store_1
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    assert_eq!(fs_1.test_get_file_content("file-1").unwrap(), "fs_1");
+}
+
+// CASE 2: Two different, concurrently changed file versions on both data stores.
+//         Choose the local item.
+#[test]
+fn sync_with_conflicts_2() {
+    let ((fs_1, data_store_1), (fs_2, data_store_2)) = create_synced_base_state();
+
+    // Two independent changes -> this should result in conflict on sync.
+    fs_1.test_set_file_content("file-1", "fs_1", true).unwrap();
+    fs_2.test_set_file_content("file-1", "fs_2", true).unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync from 1 -> 2. Choose the local item.
+    let mut conflict_happened = false;
+    data_store_2
+        .sync_from_other_store(&data_store_1, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalFileRemoteFile(_, _));
+            SyncConflictResolution::ChooseLocalItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_2.test_get_file_content("file-1").unwrap(), "fs_2");
+
+    // FIXME: Have a look at the paper and my notes tomorrow to see if this semantic is what we want.
+    //        Intuitively I would say yes, but I want to double check when I am more focused.
+    // We chose our local file. Make a further change and move the data back to store 1.
+    // This should work, as we know about all changes in 1 and then deliberately change it.
+    fs_2.test_set_file_content("file-1", "change_after_resolution", true)
+        .unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync from 2 -> 1. Should work without conflict.
+    data_store_1
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    assert_eq!(
+        fs_1.test_get_file_content("file-1").unwrap(),
+        "change_after_resolution"
+    );
+}
+
+// CASE 3: The local store deletes a file, the remote concurrently modifies it.
+//         Choose the remote item.
+#[test]
+fn sync_with_conflicts_3() {
+    let ((fs_1, data_store_1), (fs_2, data_store_2)) = create_synced_base_state();
+
+    // Now lets remove the file on one store 1 and modify it on store 2. This should conflict.
+    fs_1.remove_file("file-1").unwrap();
+    fs_2.test_set_file_content("file-1", "fs_2", true).unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync form 2 -> 1. We choose the remote item on fs_2.
+    // Resolution, we should choose the remote item on fs_2.
+    let mut conflict_happened = false;
+    data_store_1
+        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalDeletionRemoteFile(_, _));
+            SyncConflictResolution::ChooseRemoteItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_1.test_get_file_content("file-1").unwrap(), "fs_2");
+
+    // Further syncs should just work fine.
+    data_store_1
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+
+    fs_1.test_set_file_content("file-1", "fs_1", true).unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    assert_eq!(fs_2.test_get_file_content("file-1").unwrap(), "fs_1");
+}
+
+// CASE 4: The local store deletes a file, the remote concurrently modifies it.
+//         Choose the local item.
+#[test]
+fn sync_with_conflicts_4() {
+    let ((fs_1, data_store_1), (fs_2, data_store_2)) = create_synced_base_state();
+
+    // Now lets remove the file on one store 1 and modify it on store 2. This should conflict.
+    fs_1.remove_file("file-1").unwrap();
+    fs_2.test_set_file_content("file-1", "fs_2", true).unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync form 2 -> 1, should have a conflict.
+    // Resolution, we should choose the local deletion on fs_1.
+    let mut conflict_happened = false;
+    data_store_1
+        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalDeletionRemoteFile(_, _));
+            SyncConflictResolution::ChooseLocalItem
+        })
+        .unwrap();
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    assert!(conflict_happened);
+    dir_should_not_contain(&fs_1, "", vec!["file-1"]);
+    dir_should_not_contain(&fs_2, "", vec!["file-1"]);
+}
+
+// CASE 5: The local store modifies a file, the remote concurrently deletes it.
+//         Choose the local item.
+#[test]
+fn sync_with_conflicts_5() {
+    let ((fs_1, data_store_1), (fs_2, data_store_2)) = create_synced_base_state();
+
+    // Now lets remove the file on one store 1 and modify it on store 2. This should conflict.
+    fs_1.test_set_file_content("file-1", "fs_1", true).unwrap();
+    fs_2.remove_file("file-1").unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync form 2 -> 1, should have a conflict.
+    // Resolution, we should choose the local change on fs_1.
+    let mut conflict_happened = false;
+    data_store_1
+        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalFileRemoteDeletion(_, _));
+            SyncConflictResolution::ChooseLocalItem
+        })
+        .unwrap();
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_1.test_get_file_content("file-1").unwrap(), "fs_1");
+    assert_eq!(fs_2.test_get_file_content("file-1").unwrap(), "fs_1");
+}
+
+// CASE 6: The local store modifies a file, the remote concurrently deletes it.
+//         Choose the remote item.
+#[test]
+fn sync_with_conflicts_6() {
+    let ((fs_1, data_store_1), (fs_2, data_store_2)) = create_synced_base_state();
+
+    // Now lets remove the file on one store 1 and modify it on store 2. This should conflict.
+    fs_1.test_set_file_content("file-1", "fs_1", true).unwrap();
+    fs_2.remove_file("file-1").unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    // Sync form 2 -> 1, should have a conflict.
+    // Resolution, we should choose the local change on fs_1.
+    let mut conflict_happened = false;
+    data_store_1
+        .sync_from_other_store(&data_store_2, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalFileRemoteDeletion(_, _));
+            SyncConflictResolution::ChooseRemoteItem
+        })
+        .unwrap();
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    assert!(conflict_happened);
+    dir_should_not_contain(&fs_1, "", vec!["file-1"]);
+    dir_should_not_contain(&fs_2, "", vec!["file-1"]);
 }
 
 #[test]

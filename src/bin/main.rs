@@ -97,7 +97,7 @@ fn sync_from_remote(local_path: &str, cmd_cli: &ArgMatches) {
         core::data_store::DefaultDataStore::open(&PathBuf::from(remote_path)).unwrap();
 
     local_data_store
-        .sync_from_other_store(&remote_data_store, &RelativePath::from_path(""))
+        .sync_from_other_store_panic_conflicts(&remote_data_store, &RelativePath::from_path(""))
         .unwrap();
     println!("Sync Complete!");
 }

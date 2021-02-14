@@ -34,13 +34,27 @@ impl InMemoryFS {
     pub fn test_set_file_content<P: AsRef<Path>>(
         &self,
         path: P,
-        content: Vec<u8>,
+        content: &str,
+        increase_mod_time: bool,
     ) -> io::Result<()> {
         let path = self.canonicalize(path)?;
 
+        if increase_mod_time {
+            self.test_increase_file_mod_time(&path)?;
+        }
+
         if let Some(item) = self.items.borrow_mut().get_mut(&path) {
-            item.data = content;
+            item.data = Vec::from(content);
             Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+    pub fn test_get_file_content<P: AsRef<Path>>(&self, path: P) -> io::Result<String> {
+        let path = self.canonicalize(path)?;
+
+        if let Some(item) = self.items.borrow_mut().get_mut(&path) {
+            Ok(std::str::from_utf8(item.data.as_ref()).unwrap().to_string())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
         }

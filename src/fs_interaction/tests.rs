@@ -149,11 +149,11 @@ fn calculates_hash_correctly() {
     let test_fs = InMemoryFS::default();
     test_fs.create_file("/a.txt").unwrap();
     test_fs
-        .test_set_file_content("/a.txt", STRING_A.to_string().into_bytes())
+        .test_set_file_content("/a.txt", STRING_A, true)
         .unwrap();
     test_fs.create_file("/b.txt").unwrap();
     test_fs
-        .test_set_file_content("/b.txt", STRING_B.to_string().into_bytes())
+        .test_set_file_content("/b.txt", STRING_B, true)
         .unwrap();
 
     let data_store =
