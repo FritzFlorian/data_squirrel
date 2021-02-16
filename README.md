@@ -1,4 +1,4 @@
-<img src="./squirrel-small.png" align="right"
+<img src="./images/squirrel-small.png" align="right"
      alt="logo - image of squirrel with nut" width="200" height="161">
 
 # WIP: Data Squirrel
@@ -6,7 +6,52 @@
 WARNING: This project is a WORK IN PROGRESS file synchronization tool. Do not use it on any of your
 data in its current state.
 
-## Overview
+## Goal
+
+The goal is to create a file-sync tool that can keep big file vaults spread across external hard drives
+in sync by carrying only the changes on a laptop that sporadically is connected to the external hard drives. 
+
+![overview](./images/overview.png)
+
+The important aspect is that the 'carrying laptop' has far less capacity than the overall data collection stored
+on the external drives.
+
+NOTE: This project is foremost for my own education. I plan to use a variant of version vectors to achieve 
+the above goal of synchronizing the data stores. There are probably better 'simple' solutions where the
+laptop simply indexes all external drives. I mainly use version vectors out of curiosity to build something
+using optimistic replication.
+
+## Usage
+
+The basic usage involves creating multiple data stores (synced folders) with the same name.
+They can then be indexed for changes on disk.
+When a folder is fully indexed, it can be synced with any other folder.
+The version vector pair algorithm detects any conflicts (resolution is currently not exposed in the CLI,
+but exists internally, see tests for examples).
+
+```shell
+# Create a new data store, i.e. a synced folder
+squirrel ./existing-folder create --name="UNIQUE-NAME-FOR-DATA"
+# Scan the content of the folder and store it to the db
+squirrel ./existing-folder scan
+
+# Create a second folder that we want to keep in sync
+mkdir ./synced-folder
+squirrel ./synced-folder create --name="UNIQUE-NAME-FOR-DATA"
+squirrel ./synced-folder scan
+
+# Copy the content from existing-folder -to-> synced-folder
+squirrel ./synced-folder sync-from ./existing-folder
+
+# Make a change and index it
+echo "Hi" > ./synced-folder/test.txt
+squirrel ./synced-folder scan
+
+# Merge it back to the original folder
+squirrel ./existing-folder sync-from ./synced-folder
+```
+
+## Background
 
 Data Squirrel aims to be an offline first, peer to peer file synchronizer, heavily based on Tra
 (https://pdos.csail.mit.edu/archive/6.824-2004/papers/tra.pdf).
