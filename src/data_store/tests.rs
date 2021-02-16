@@ -1110,6 +1110,200 @@ fn sync_with_conflicts_10() {
     dir_should_contain(&fs_2, "file-1", vec!["file-2"]);
 }
 
+// Testing the ability of version vectors to 'forward' a sync decision to further syncs.
+// The goal is for a conflict resolution to be 'remembered' for further syncs, not causing
+// subsequent conflicts if possible.
+// The three cases here are the same as in 'File Synchronization with Vector Time Pairs'
+// by Russ Cox and William Josephson, page 4, figure 3 (b) to (d).
+// Case 1: Same as figure (b)
+#[test]
+fn sync_conflict_forwarding_multiple_1() {
+    let (fs_a, data_store_a) = create_in_memory_store();
+    let (fs_b, data_store_b) = create_in_memory_store();
+    let (_fs_c, data_store_c) = create_in_memory_store();
+
+    // Time 1
+    fs_b.create_file("file-1").unwrap();
+    data_store_b.perform_full_scan().unwrap();
+    // Time 2
+    data_store_a
+        .sync_from_other_store_panic_conflicts(&data_store_b, &RelativePath::from_path(""))
+        .unwrap();
+    // Time 3
+    data_store_c
+        .sync_from_other_store_panic_conflicts(&data_store_b, &RelativePath::from_path(""))
+        .unwrap();
+
+    fs_a.test_set_file_content("file-1", "fs_a", true).unwrap();
+    data_store_a.perform_full_scan().unwrap();
+    fs_b.test_set_file_content("file-1", "fs_b", true).unwrap();
+    data_store_b.perform_full_scan().unwrap();
+
+    // Time 4
+    let mut conflict_happened = false;
+    data_store_b
+        .sync_from_other_store(&data_store_a, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalItemRemoteFile(_, _));
+            SyncConflictResolution::ChooseRemoteItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_a");
+
+    // Time 5
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_a, &RelativePath::from_path(""))
+        .unwrap();
+    // Time 6
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_c, &RelativePath::from_path(""))
+        .unwrap();
+    fs_a.test_set_file_content("file-1", "fs_a'", true).unwrap();
+    data_store_a.perform_full_scan().unwrap();
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_a");
+    // Time 7
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_a, &RelativePath::from_path(""))
+        .unwrap();
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_a'");
+}
+
+// Testing the ability of version vectors to 'forward' a sync decision to further syncs.
+// The goal is for a conflict resolution to be 'remembered' for further syncs, not causing
+// subsequent conflicts if possible.
+// The three cases here are the same as in 'File Synchronization with Vector Time Pairs'
+// by Russ Cox and William Josephson, page 4, figure 3 (b) to (d).
+// Case 2: Same as figure (c)
+#[test]
+fn sync_conflict_forwarding_multiple_2() {
+    let (fs_a, data_store_a) = create_in_memory_store();
+    let (fs_b, data_store_b) = create_in_memory_store();
+    let (_fs_c, data_store_c) = create_in_memory_store();
+
+    // Time 1
+    fs_b.create_file("file-1").unwrap();
+    data_store_b.perform_full_scan().unwrap();
+    // Time 2
+    data_store_a
+        .sync_from_other_store_panic_conflicts(&data_store_b, &RelativePath::from_path(""))
+        .unwrap();
+    // Time 3
+    data_store_c
+        .sync_from_other_store_panic_conflicts(&data_store_b, &RelativePath::from_path(""))
+        .unwrap();
+
+    fs_a.test_set_file_content("file-1", "fs_a", true).unwrap();
+    data_store_a.perform_full_scan().unwrap();
+    fs_b.test_set_file_content("file-1", "fs_b", true).unwrap();
+    data_store_b.perform_full_scan().unwrap();
+
+    // Time 4
+    let mut conflict_happened = false;
+    data_store_b
+        .sync_from_other_store(&data_store_a, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalItemRemoteFile(_, _));
+            SyncConflictResolution::ChooseLocalItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_b");
+
+    // Time 5
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_a, &RelativePath::from_path(""))
+        .unwrap();
+    // Time 6
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_c, &RelativePath::from_path(""))
+        .unwrap();
+    fs_a.test_set_file_content("file-1", "fs_a'", true).unwrap();
+    data_store_a.perform_full_scan().unwrap();
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_b");
+    // Time 7
+    let mut conflict_happened = false;
+    data_store_b
+        .sync_from_other_store(&data_store_a, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalItemRemoteFile(_, _));
+            SyncConflictResolution::ChooseRemoteItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_a'");
+}
+
+// Testing the ability of version vectors to 'forward' a sync decision to further syncs.
+// The goal is for a conflict resolution to be 'remembered' for further syncs, not causing
+// subsequent conflicts if possible.
+// The three cases here are the same as in 'File Synchronization with Vector Time Pairs'
+// by Russ Cox and William Josephson, page 4, figure 3 (b) to (d).
+// Case 3: Same as figure (d)
+#[test]
+fn sync_conflict_forwarding_multiple_3() {
+    let (fs_a, data_store_a) = create_in_memory_store();
+    let (fs_b, data_store_b) = create_in_memory_store();
+    let (_fs_c, data_store_c) = create_in_memory_store();
+
+    // Time 1
+    fs_b.create_file("file-1").unwrap();
+    data_store_b.perform_full_scan().unwrap();
+    // Time 2
+    data_store_a
+        .sync_from_other_store_panic_conflicts(&data_store_b, &RelativePath::from_path(""))
+        .unwrap();
+    // Time 3
+    data_store_c
+        .sync_from_other_store_panic_conflicts(&data_store_b, &RelativePath::from_path(""))
+        .unwrap();
+
+    fs_a.test_set_file_content("file-1", "fs_a", true).unwrap();
+    data_store_a.perform_full_scan().unwrap();
+    fs_b.test_set_file_content("file-1", "fs_b", true).unwrap();
+    data_store_b.perform_full_scan().unwrap();
+
+    // Time 4
+    let mut conflict_happened = false;
+    data_store_b
+        .sync_from_other_store(&data_store_a, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalItemRemoteFile(_, _));
+            SyncConflictResolution::ChooseLocalItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_b");
+    // EMULATING MERGING THE TWO FILES.
+    // In our implementation this is ALWAYS a two action operation.
+    // We keep one of the two files and place the second one as a 'file-1-conflict' besides it.
+    // The user then merges them manually and re-indexes.
+    fs_b.test_set_file_content("file-1", "fs_b_and_fs_a", true)
+        .unwrap();
+    data_store_b.perform_full_scan().unwrap();
+
+    // Time 5
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_a, &RelativePath::from_path(""))
+        .unwrap();
+    // Time 6
+    data_store_b
+        .sync_from_other_store_panic_conflicts(&data_store_c, &RelativePath::from_path(""))
+        .unwrap();
+    fs_a.test_set_file_content("file-1", "fs_a'", true).unwrap();
+    data_store_a.perform_full_scan().unwrap();
+    assert_eq!(
+        fs_b.test_get_file_content("file-1").unwrap(),
+        "fs_b_and_fs_a"
+    );
+    // Time 7
+    let mut conflict_happened = false;
+    data_store_b
+        .sync_from_other_store(&data_store_a, &RelativePath::from_path(""), &mut |event| {
+            conflict_happened = matches!(event, SyncConflictEvent::LocalItemRemoteFile(_, _));
+            SyncConflictResolution::ChooseRemoteItem
+        })
+        .unwrap();
+    assert!(conflict_happened);
+    assert_eq!(fs_b.test_get_file_content("file-1").unwrap(), "fs_a'");
+}
+
 #[test]
 fn convert_from_and_to_external_version_vectors() {
     let (_fs_1, data_store_1) = create_in_memory_store();
