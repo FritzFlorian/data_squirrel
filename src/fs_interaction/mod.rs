@@ -258,7 +258,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
     }
     pub fn delete_directory(&self, relative_path: &RelativePath) -> Result<()> {
         let absolute_path = self.root_path.join(&relative_path.to_path_buf());
-        self.fs.remove_dir(&absolute_path)?;
+        self.fs.remove_dir_recursive(&absolute_path)?;
 
         Ok(())
     }

@@ -172,12 +172,23 @@ impl FS for InMemoryFS {
 
         Ok(())
     }
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+    fn remove_dir_recursive<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         let path = self.canonicalize(path)?;
 
-        if self.is_root(&path) || self.children_exist(&path) {
+        if self.is_root(&path) {
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         } else if self.items.borrow_mut().deref_mut().remove(&path).is_some() {
+            let child_paths: Vec<_> = self
+                .items
+                .borrow_mut()
+                .iter()
+                .filter(|(other_path, _)| other_path.starts_with(&path))
+                .map(|(child_path, _)| child_path.to_owned())
+                .collect();
+            for child_path in child_paths {
+                self.items.borrow_mut().deref_mut().remove(&child_path);
+            }
+
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))

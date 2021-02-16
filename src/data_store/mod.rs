@@ -343,10 +343,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 LocalDeletionRemoteFile(_, _) => panic!(
                     "Detected sync-conflict: Remote has changes on an item that was deleted locally!"
                 ),
-                LocalFileRemoteFile(_, _) => panic!(
+                LocalItemRemoteFile(_, _) => panic!(
                     "Detected sync-conflict: Remote has changed an item concurrently to this data store!"
                 ),
-                LocalFileRemoteDeletion(_, _) => panic!(
+                LocalItemRemoteDeletion(_, _) => panic!(
                     "Detected sync-conflict: Remote has deleted an item concurrently that we made changes to!"
                 ),
             }
@@ -510,18 +510,27 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .join_mut(sync_content.fs_metadata.case_sensitive_name.clone());
 
         if local_item.is_deletion() && sync_content.creation_time <= local_item.sync_time {
-            // We know of the other file in our history and have deleted it.
+            // We know of the other item in our history and have deleted it.
             // At the same time there is new data for this item on the remote...
-            match sync_conflict(LocalDeletionRemoteFolder(&local_item, &sync_content)) {
-                SyncConflictResolution::ChooseLocalItem => {
-                    self.increase_item_sync_time(local_item, sync_time)?;
-                    return Ok(true);
-                }
-                SyncConflictResolution::ChooseRemoteItem => {
-                    // Do nothing, the 'normal' sync procedure will do.
-                }
-                SyncConflictResolution::DoNotResolve => {
-                    return Ok(false);
+            if local_item.sync_time <= sync_time {
+                // The remote's sync time dominates our local sync time.
+                // This is an interesting special case, where the remote saw our wish to delete
+                // the file but had own, local changes. The remote then decided to keep the file.
+                // We want to get the file back from the remote, as at some point this was the wish.
+                // NOTE: This case does not handle all combinations that the other store can know
+                //       about our deletion and return the file to us. We are fine with these cases.
+            } else {
+                match sync_conflict(LocalDeletionRemoteFolder(&local_item, &sync_content)) {
+                    SyncConflictResolution::ChooseLocalItem => {
+                        self.increase_item_sync_time(local_item, sync_time)?;
+                        return Ok(true);
+                    }
+                    SyncConflictResolution::ChooseRemoteItem => {
+                        // Do nothing, the 'normal' sync procedure will do.
+                    }
+                    SyncConflictResolution::DoNotResolve => {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -685,12 +694,12 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             // We know of the other file in our history and have deleted it.
             // At the same time there is new data for this item on the remote...
             if local_item.sync_time <= sync_time {
-                // TODO: Fully work through examples on paper if this never results in
-                //       issues with more than 2 stores involved.
                 // The remote's sync time dominates our local sync time.
                 // This is an interesting special case, where the remote saw our wish to delete
                 // the file but had own, local changes. The remote then decided to keep the file.
-                // We want to get the file back from the remote.
+                // We want to get the file back from the remote, as at some point this was the wish.
+                // NOTE: This case does not handle all combinations that the other store can know
+                //       about our deletion and return the file to us. We are fine with these cases.
             } else {
                 match sync_conflict(LocalDeletionRemoteFile(&local_item, &sync_content)) {
                     SyncConflictResolution::ChooseLocalItem => {
@@ -709,7 +718,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         if !local_item.is_deletion() && !(local_item.mod_time() <= &sync_time) {
             // The remote has a new change, but does not know everything about
             // our local changes...
-            match sync_conflict(LocalFileRemoteFile(&local_item, &sync_content)) {
+            match sync_conflict(LocalItemRemoteFile(&local_item, &sync_content)) {
                 SyncConflictResolution::ChooseLocalItem => {
                     self.increase_item_sync_time(local_item, sync_time)?;
                     return Ok(true);
@@ -808,7 +817,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     return Ok(false);
                 } else {
                     // ...we actually have a real conflict. Try to resolve it.
-                    match sync_conflict(LocalFileRemoteDeletion(&local_item, &sync_content)) {
+                    match sync_conflict(LocalItemRemoteDeletion(&local_item, &sync_content)) {
                         SyncConflictResolution::ChooseLocalItem => {
                             self.increase_item_sync_time(local_item, sync_time)?;
                             return Ok(true);

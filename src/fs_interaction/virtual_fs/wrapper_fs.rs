@@ -56,8 +56,8 @@ impl FS for WrapperFS {
             Ok(())
         }
     }
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        fs::remove_dir(path)
+    fn remove_dir_recursive<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        fs::remove_dir_all(path)
     }
     fn list_dir<P: AsRef<Path>>(&self, path: P) -> io::Result<Vec<DirEntry>> {
         let result: Result<Vec<_>, _> = fs::read_dir(path)?

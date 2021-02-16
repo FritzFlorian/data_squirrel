@@ -8,10 +8,11 @@ pub enum SyncConflictResolution {
 }
 
 pub enum SyncConflictEvent<'a> {
-    // Remote has changes on an item that was deleted locally.
-    LocalDeletionRemoteFolder(&'a DBItem, &'a IntFolderSyncContent),
     LocalFileRemoteFolder(&'a DBItem, &'a IntFolderSyncContent),
+
     LocalDeletionRemoteFile(&'a DBItem, &'a IntFileSyncContent),
-    LocalFileRemoteFile(&'a DBItem, &'a IntFileSyncContent),
-    LocalFileRemoteDeletion(&'a DBItem, &'a IntDeletionSyncContent),
+    LocalDeletionRemoteFolder(&'a DBItem, &'a IntFolderSyncContent),
+
+    LocalItemRemoteFile(&'a DBItem, &'a IntFileSyncContent),
+    LocalItemRemoteDeletion(&'a DBItem, &'a IntDeletionSyncContent),
 }
