@@ -97,6 +97,81 @@ fn enforces_single_data_set() {
 }
 
 #[test]
+fn clean_up_simple_deletions() {
+    let metadata_store = open_metadata_store();
+    let (_data_set, _data_store) = insert_sample_data_set(&metadata_store);
+
+    insert_data_item(&metadata_store, "file-1", true);
+    insert_data_item(&metadata_store, "folder-1", false);
+    insert_data_item(&metadata_store, "folder-1/file-2", true);
+    insert_data_item(&metadata_store, "folder-1/file-3", true);
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 5);
+
+    delete_data_item(&metadata_store, "file-1");
+    delete_data_item(&metadata_store, "folder-1/file-2");
+    delete_data_item(&metadata_store, "folder-1/file-3");
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 5);
+
+    metadata_store.clean_up_local_sync_times().unwrap();
+    metadata_store.clean_up_deleted_items().unwrap();
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 2);
+
+    delete_data_item(&metadata_store, "folder-1");
+    metadata_store.clean_up_local_sync_times().unwrap();
+    metadata_store.clean_up_deleted_items().unwrap();
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 1);
+
+    assert_eq!(metadata_store.count_path_components_in_db().unwrap(), 5);
+    metadata_store.clean_up_path_components().unwrap();
+    assert_eq!(metadata_store.count_path_components_in_db().unwrap(), 1);
+}
+
+#[test]
+fn clean_up_synced_deletions() {
+    let metadata_store = open_metadata_store();
+    let (data_set, local_store) = insert_sample_data_set(&metadata_store);
+    let remote_store = insert_data_store(&metadata_store, &data_set, "remote", false);
+
+    // Insert the same local items.
+    insert_data_item(&metadata_store, "file-0", true);
+    insert_data_item(&metadata_store, "file-1", true);
+    insert_data_item(&metadata_store, "folder-1", false);
+    insert_data_item(&metadata_store, "folder-1/file-2", true);
+    insert_data_item(&metadata_store, "folder-1/file-3", true);
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 6);
+
+    // This time bump some sync times before we perform the deletion.
+    // This should force us to keep some more notices.
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 10)]),
+        "file-1",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 10)]),
+        "folder-1",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 15), (&remote_store.id, 15)]),
+        "folder-1/file-3",
+    );
+
+    delete_data_item(&metadata_store, "file-0");
+    delete_data_item(&metadata_store, "file-1");
+    delete_data_item(&metadata_store, "folder-1/file-2");
+    delete_data_item(&metadata_store, "folder-1/file-3");
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 6);
+
+    // We MUST keep 'file-1' and 'file-3', as their sync time differs from their parent sync time.
+    // We MUST keep 'folder-1' and '', as they are not deleted. Makes 4 total.
+    metadata_store.clean_up().unwrap();
+    assert_eq!(metadata_store.count_items_in_db().unwrap(), 4);
+    assert_eq!(metadata_store.count_path_components_in_db().unwrap(), 4);
+}
+
+#[test]
 fn correctly_enter_data_items() {
     let metadata_store = open_metadata_store();
     let (_data_set, data_store) = insert_sample_data_set(&metadata_store);
@@ -211,6 +286,18 @@ fn correctly_persevere_case_sensitivity() {
     }));
 }
 
+fn bump_sync_time(metadata_store: &MetadataDB, sync_time: VersionVector<i64>, path: &str) {
+    let mut target_data_item = metadata_store
+        .get_local_data_item(&RelativePath::from_path(path), true)
+        .unwrap();
+    for (store_id, time) in sync_time.iter() {
+        target_data_item.sync_time[&store_id] = *time;
+    }
+    metadata_store
+        .sync_local_data_item(&RelativePath::from_path(path), &target_data_item)
+        .unwrap();
+}
+
 #[test]
 fn correctly_inserts_synced_data_items() {
     // We use our usual local, sample data set and store and create an additional remote one.
@@ -224,13 +311,11 @@ fn correctly_inserts_synced_data_items() {
     insert_data_item(&metadata_store, "sub/folder/file", true);
 
     // First of, lets try bumping some synchronization vector times.
-    let mut target_data_item = metadata_store
-        .get_local_data_item(&RelativePath::from_path("sub"), true)
-        .unwrap();
-    target_data_item.sync_time[&remote_store.id] = 10;
-    metadata_store
-        .sync_local_data_item(&RelativePath::from_path("sub"), &target_data_item)
-        .unwrap();
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&remote_store.id, 10)]),
+        "sub",
+    );
 
     // We duplicate some sync times when performing the sync on the target item.
     let cleaned_items = metadata_store.clean_up_local_sync_times().unwrap();
@@ -241,14 +326,11 @@ fn correctly_inserts_synced_data_items() {
     assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 10);
 
     // Also try to 'partially' bump the sync times.
-    let mut target_data_item = metadata_store
-        .get_local_data_item(&RelativePath::from_path(""), true)
-        .unwrap();
-    target_data_item.sync_time[&local_store.id] = 5;
-    target_data_item.sync_time[&remote_store.id] = 7;
-    metadata_store
-        .sync_local_data_item(&RelativePath::from_path(""), &target_data_item)
-        .unwrap();
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 5), (&remote_store.id, 7)]),
+        "",
+    );
 
     assert_sync_time(&metadata_store, "", remote_store.id, 7);
     assert_sync_time(&metadata_store, "sub", remote_store.id, 10);

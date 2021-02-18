@@ -55,13 +55,15 @@ impl MetadataDB {
 
     /// Performs a clean-up operation on the local database, removing any redundant information.
     /// Should be run from time to time to decrease the DB size on disk.
-    pub fn clean_up(&self) -> Result<usize> {
-        let cleaned_sync_times = self.clean_up_local_sync_times()?;
+    pub fn clean_up(&self) -> Result<()> {
+        self.clean_up_local_sync_times()?;
+        self.clean_up_deleted_items()?;
+        self.clean_up_path_components()?;
 
         diesel::sql_query("ANALYZE").execute(&self.conn)?;
         diesel::sql_query("VACUUM").execute(&self.conn)?;
 
-        Ok(cleaned_sync_times)
+        Ok(())
     }
 
     // Run the given function 'bundled' on the database.
@@ -1037,6 +1039,35 @@ impl MetadataDB {
             .execute(&self.conn)?;
 
         Ok(())
+    }
+
+    fn clean_up_deleted_items(&self) -> Result<()> {
+        // file_type = 3 is all deletions, the select after that selects only deletions with no
+        // sync time entries, i.e. it deletes all 'implicit' deletions.
+        diesel::sql_query("DELETE FROM items WHERE items.file_type = 3 AND (SELECT COUNT(*) FROM sync_times WHERE sync_times.item_id = items.id) = 0").execute(&self.conn)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn count_items_in_db(&self) -> Result<i64> {
+        let item_count = items::table
+            .select(diesel::dsl::count(items::id))
+            .first(&self.conn)?;
+        Ok(item_count)
+    }
+
+    fn clean_up_path_components(&self) -> Result<()> {
+        // delete all path_components that have no item using them in the DB.
+        diesel::sql_query("DELETE FROM path_components WHERE (SELECT COUNT(*) FROM items WHERE items.path_component_id = path_components.id) = 0").execute(&self.conn)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn count_path_components_in_db(&self) -> Result<i64> {
+        let path_count = path_components::table
+            .select(diesel::dsl::count(path_components::id))
+            .first(&self.conn)?;
+        Ok(path_count)
     }
 
     fn clean_up_local_sync_times(&self) -> Result<usize> {
