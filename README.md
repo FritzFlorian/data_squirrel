@@ -1,6 +1,8 @@
 <img src="./images/squirrel-small.png" align="right"
      alt="logo - image of squirrel with nut" width="200" height="161">
 
+[![test](https://github.com/FritzFlorian/data_squirrel/actions/workflows/test.yml/badge.svg)](https://github.com/FritzFlorian/data_squirrel/actions/workflows/test.yml)
+
 # WIP: Data Squirrel
 
 WARNING: This project is a WORK IN PROGRESS file synchronization tool. Do not use it on any of your
