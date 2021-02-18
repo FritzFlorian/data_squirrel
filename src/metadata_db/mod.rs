@@ -1041,6 +1041,95 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Queries the DB for DBItems that hold 'significant sync times'.
+    /// A sync time is significant, if it has entries stored in the DB.
+    /// After running `clean_up_local_sync_times` this function should only return
+    /// DBItems that have changes in their sync time compared to their parent.
+    pub fn find_local_significant_sync_times(
+        &self,
+    ) -> Result<Vec<(RelativePath, VersionVector<i64>)>> {
+        #[derive(QueryableByName)]
+        #[table_name = "path_components"]
+        struct PathResult {
+            full_path: String,
+        }
+        self.conn.transaction(|| {
+            let significant_paths = diesel::sql_query("SELECT path_components.full_path FROM items, path_components WHERE ((SELECT COUNT(*) FROM sync_times WHERE sync_times.item_id = items.id) > 0 OR full_path = '/') AND path_components.id = items.path_component_id").load::<PathResult>(&self.conn)?;
+            significant_paths
+                .into_iter()
+                .map(|item| RelativePath::from_path(&item.full_path[1..]))
+                .map(|path| {
+                    let db_item =  self.get_local_data_item(&path, true)?;
+                    Ok((db_item.path, db_item.sync_time))
+                })
+                .collect()
+        })
+    }
+
+    /// Enters the significant sync times of another data store into the local DB.
+    /// Once entered, `find_sync_time` will return the correct sync time for the
+    /// data store on subsequent calls respecting the signficant sync times.
+    ///
+    /// Essentially, this allows to transfer the knowledge of the synchronization status
+    /// of other data stores into the local data store. This is the key piece of information
+    /// needed to implement 'carrying' of data on devices like a laptop.
+    pub fn enter_significant_sync_times_for(
+        &self,
+        data_store: &DataStore,
+        entries: Vec<(RelativePath, VersionVector<i64>)>,
+    ) -> Result<()> {
+        self.conn.transaction(|| {
+            assert_ne!(
+                data_store.id,
+                self.get_local_data_store()?.id,
+                "Must not enter significant sync times for the local data store! This information is only valid for external stores."
+            );
+            // Delete existing entries...
+            diesel::delete(items::table.filter(items::data_store_id.eq(data_store.id))).execute(&self.conn)?;
+            // ...overwrite with given entries
+            for (path, sync_time) in entries {
+                // This search for the correct path_component is not very efficient.
+                // But it will probably do for now, as we expect very few significant items.
+                let mut current_path = self.ensure_path_exists("", None)?;
+                for path_component in path.get_path_components().iter().skip(1) {
+                    current_path = self.ensure_path_exists(path_component, Some(&current_path))?;
+                }
+
+                diesel::insert_into(items::table)
+                    .values(item::InsertFull {
+                        data_store_id: data_store.id,
+                        path_component_id: current_path.id,
+                        file_type: FileType::IGNORED
+                    }).execute(&self.conn)?;
+                let item = items::table
+                    .filter(items::data_store_id.eq(data_store.id))
+                    .filter(items::path_component_id.eq(current_path.id))
+                    .first::<Item>(&self.conn)?;
+                for (store_id, time) in sync_time.iter() {
+                    diesel::insert_into(sync_times::table)
+                        .values(sync_time::InsertFull {
+                            item_id: item.id,
+                            data_store_id: *store_id,
+                            time: *time
+                        }).execute(&self.conn)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Queries the sync time of a given item for the given data store.
+    pub fn find_sync_time(
+        &self,
+        data_store: &DataStore,
+        path: &RelativePath,
+    ) -> Result<VersionVector<i64>> {
+        let mut path_items = self
+            .load_data_items_on_path(&data_store, &path, true)
+            .unwrap();
+        Ok(path_items.pop().unwrap().sync_time.unwrap())
+    }
+
     fn clean_up_deleted_items(&self) -> Result<()> {
         // file_type = 3 is all deletions, the select after that selects only deletions with no
         // sync time entries, i.e. it deletes all 'implicit' deletions.

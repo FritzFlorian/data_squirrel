@@ -166,7 +166,25 @@ fn clean_up_synced_deletions() {
 
     // We MUST keep 'file-1' and 'file-3', as their sync time differs from their parent sync time.
     // We MUST keep 'folder-1' and '', as they are not deleted. Makes 4 total.
-    metadata_store.clean_up().unwrap();
+    metadata_store.clean_up_local_sync_times().unwrap();
+    // Take a intermediate step: here we should be able to identify the 'significant sync times'
+    let significant_items = metadata_store.find_local_significant_sync_times().unwrap();
+    assert_eq!(significant_items.len(), 4);
+    assert!(significant_items
+        .iter()
+        .any(|item| item.0.to_path_buf().to_str().unwrap() == "file-1"));
+    assert!(significant_items
+        .iter()
+        .any(|item| item.0.to_path_buf().to_str().unwrap() == "folder-1/file-3"));
+    assert!(significant_items
+        .iter()
+        .any(|item| item.0.to_path_buf().to_str().unwrap() == "folder-1"));
+    assert!(significant_items
+        .iter()
+        .any(|item| item.0.to_path_buf().to_str().unwrap() == ""));
+    // Continue our clean-up and check it.
+    metadata_store.clean_up_deleted_items().unwrap();
+    metadata_store.clean_up_path_components().unwrap();
     assert_eq!(metadata_store.count_items_in_db().unwrap(), 4);
     assert_eq!(metadata_store.count_path_components_in_db().unwrap(), 4);
 }
@@ -427,4 +445,121 @@ fn correctly_inserts_synced_data_items() {
         .unwrap();
     assert!(file_item_after_update.is_deletion());
     assert_eq!(file_item_after_update.sync_time[&remote_store.id], 4096,);
+}
+
+#[test]
+fn transfer_significant_sync_times() {
+    let metadata_store = open_metadata_store();
+    let (data_set, local_store) = insert_sample_data_set(&metadata_store);
+    let remote_store = insert_data_store(&metadata_store, &data_set, "remote", false);
+
+    // Insert some items to assign sync times to.
+    insert_data_item(&metadata_store, "file-0", true);
+    insert_data_item(&metadata_store, "file-1", true);
+    insert_data_item(&metadata_store, "folder-1", false);
+    insert_data_item(&metadata_store, "folder-1/file-2", true);
+    insert_data_item(&metadata_store, "folder-1/file-3", true);
+
+    // Enter sync times for the local data store.
+    // Significant ones should be "", "file-1", "folder-1/file-3".
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+        "",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+        "file-0",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 8)]),
+        "file-1",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+        "folder-1",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+        "folder-1/file-2",
+    );
+    bump_sync_time(
+        &metadata_store,
+        VersionVector::from_initial_values(vec![(&local_store.id, 15), (&remote_store.id, 15)]),
+        "folder-1/file-3",
+    );
+
+    // Cleaning of sync times is required to detect significant sync times.
+    // (In the future we might want to hold this 'clean sync times' property at all times,
+    //  thus sparing the rather expensive clean-up operation).
+    metadata_store.clean_up_local_sync_times().unwrap();
+    // Snapshot the local significant sync times.
+    let local_significant = metadata_store.find_local_significant_sync_times().unwrap();
+    // Delete some local items and clean up their db entries
+    // (this tests the creating of path_components in the enter_significant_sync_times_for call).
+    delete_data_item(&metadata_store, "file-0");
+    delete_data_item(&metadata_store, "folder-1/file-3");
+    metadata_store.clean_up().unwrap();
+
+    // Simulate that we get to know the remote stores view of the system (which was what we
+    // initially setup for this test before deleting the items).
+    metadata_store
+        .enter_significant_sync_times_for(&remote_store, local_significant)
+        .unwrap();
+
+    // Queries should now return the expected, initial state.
+    assert_remote_sync_time(
+        &metadata_store,
+        &remote_store,
+        "",
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+    );
+    assert_remote_sync_time(
+        &metadata_store,
+        &remote_store,
+        "file-0",
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+    );
+    assert_remote_sync_time(
+        &metadata_store,
+        &remote_store,
+        "file-1",
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 8)]),
+    );
+    assert_remote_sync_time(
+        &metadata_store,
+        &remote_store,
+        "folder-1",
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+    );
+    assert_remote_sync_time(
+        &metadata_store,
+        &remote_store,
+        "folder-1/file-2",
+        VersionVector::from_initial_values(vec![(&local_store.id, 10), (&remote_store.id, 5)]),
+    );
+    assert_remote_sync_time(
+        &metadata_store,
+        &remote_store,
+        "folder-1/file-3",
+        VersionVector::from_initial_values(vec![(&local_store.id, 15), (&remote_store.id, 15)]),
+    );
+}
+
+fn assert_remote_sync_time(
+    metadata_store: &MetadataDB,
+    data_store: &DataStore,
+    path: &str,
+    sync_time: VersionVector<i64>,
+) {
+    let db_sync_time = metadata_store
+        .find_sync_time(&data_store, &RelativePath::from_path(path))
+        .unwrap();
+    for (store_id, time) in sync_time.iter() {
+        assert_eq!(db_sync_time[store_id], *time);
+    }
 }
