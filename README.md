@@ -28,8 +28,8 @@ using optimistic replication.
 The basic usage involves creating multiple data stores (synced folders) with the same name.
 They can then be indexed for changes on disk.
 When a folder is fully indexed, it can be synced with any other folder.
-The version vector pair algorithm detects any conflicts (resolution is currently not exposed in the CLI,
-but exists internally, see tests for examples).
+The version vector pair algorithm detects any conflicts 
+(the CLI currently exposes simple switch for conflict resolution).
 
 ```shell
 # Create a new data store, i.e. a synced folder
@@ -51,6 +51,13 @@ squirrel ./synced-folder scan
 
 # Merge it back to the original folder
 squirrel ./existing-folder sync-from ./synced-folder
+
+
+# In case there would be any conflicts during a sync (file changed in both folders), run
+squirrel ./existing-folder sync-from ./synced-folder --choose-local
+# or
+squirrel ./existing-folder sync-from ./synced-folder --choose-remote
+# to keep either the local or remote change (more fine grained resolution strategies will be added).
 ```
 
 ## Background

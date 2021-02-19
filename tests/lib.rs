@@ -1,9 +1,11 @@
 extern crate assert_cmd;
+extern crate predicates;
 extern crate tempfile;
 
 #[cfg(test)]
 mod tests {
     use assert_cmd::Command;
+    use predicates::prelude::*;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -35,18 +37,26 @@ mod tests {
             .assert()
             .success();
     }
+    fn cmd_should_print(dir: &TempDir, cmd: &str, args: Vec<&str>, expected: &str) {
+        main_cmd()
+            .arg(dir.path())
+            .arg(cmd)
+            .args(args)
+            .assert()
+            .stdout(predicate::function(|output: &str| {
+                output.contains(&expected)
+            }));
+    }
 
     #[test]
     fn basic_two_folder_sync() {
         let dir_1 = tempfile::tempdir().unwrap();
         let dir_2 = tempfile::tempdir().unwrap();
-
-        create_file(&dir_1, "file-1", "content 1");
-        create_file(&dir_2, "file-2", "content 2");
-
         cmd_success(&dir_1, "create", vec!["--name='XYZ'"]);
         cmd_success(&dir_2, "create", vec!["--name='XYZ'"]);
 
+        create_file(&dir_1, "file-1", "content 1");
+        create_file(&dir_2, "file-2", "content 2");
         cmd_success(&dir_1, "scan", vec![]);
         cmd_success(&dir_2, "scan", vec![]);
 
@@ -57,5 +67,35 @@ mod tests {
         assert_file(&dir_1, "file-2", "content 2");
         assert_file(&dir_2, "file-1", "content 1");
         assert_file(&dir_2, "file-2", "content 2");
+    }
+
+    #[test]
+    fn basic_two_folder_conflict_resolution() {
+        let dir_1 = tempfile::tempdir().unwrap();
+        let dir_2 = tempfile::tempdir().unwrap();
+        cmd_success(&dir_1, "create", vec!["--name='XYZ'"]);
+        cmd_success(&dir_2, "create", vec!["--name='XYZ'"]);
+
+        create_file(&dir_1, "file-1", "content 1");
+        create_file(&dir_2, "file-1", "content 2");
+        cmd_success(&dir_1, "scan", vec![]);
+        cmd_success(&dir_2, "scan", vec![]);
+
+        cmd_should_print(
+            &dir_1,
+            "sync-from",
+            vec![dir_2.path().to_str().unwrap()],
+            "Do not resolve the conflict",
+        );
+
+        cmd_success(
+            &dir_1,
+            "sync-from",
+            vec![dir_2.path().to_str().unwrap(), "--choose-local"],
+        );
+        cmd_success(&dir_2, "sync-from", vec![dir_1.path().to_str().unwrap()]);
+
+        assert_file(&dir_1, "file-1", "content 1");
+        assert_file(&dir_2, "file-1", "content 1");
     }
 }

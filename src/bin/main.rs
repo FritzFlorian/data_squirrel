@@ -25,9 +25,23 @@ fn main() {
         .required(true)
         .index(1)
         .help("Path of the remote data store on disk");
+    let conflict_choose_local = Arg::with_name("choose-local")
+        .long("choose-local")
+        .short("l")
+        .help("Instructs the sync algorithm to choose the local over the remote item on conflicts.")
+        .required(false)
+        .takes_value(false);
+    let conflict_choose_remote = Arg::with_name("choose-remote")
+        .long("choose-remote")
+        .short("r")
+        .help("Instructs the sync algorithm to choose the remote over the local item on conflicts.")
+        .required(false)
+        .takes_value(false);
     let sync_from_cmd = SubCommand::with_name("sync-from")
         .about("syncs from the remote store to the local store (local <- remote)")
-        .arg(remote_path_arg);
+        .arg(remote_path_arg)
+        .arg(conflict_choose_local)
+        .arg(conflict_choose_remote);
 
     let local_path_arg = Arg::with_name("LOCAL_PATH")
         .required(true)
@@ -90,14 +104,44 @@ fn scan_data_store(local_path: &str, _cmd_cli: &ArgMatches) {
 
 fn sync_from_remote(local_path: &str, cmd_cli: &ArgMatches) {
     println!("Syncing new changes FROM remote TO local data store...");
+    let choose_local = cmd_cli.is_present("choose-local");
+    let choose_remote = cmd_cli.is_present("choose-remote");
+    if choose_local && choose_remote {
+        panic!("Must not choose both local and remote items on sync (use either --choose-local or --choose-remote or none)");
+    }
+
     let local_data_store =
         core::data_store::DefaultDataStore::open(&PathBuf::from(local_path)).unwrap();
     let remote_path = cmd_cli.value_of("REMOTE_PATH").unwrap();
     let remote_data_store =
         core::data_store::DefaultDataStore::open(&PathBuf::from(remote_path)).unwrap();
 
+    use core::data_store::SyncConflictEvent::*;
+    use core::data_store::SyncConflictResolution;
     local_data_store
-        .sync_from_other_store_panic_conflicts(&remote_data_store, &RelativePath::from_path(""))
+        .sync_from_other_store(
+            &remote_data_store,
+            &RelativePath::from_path(""),
+            &mut |conflict| match conflict {
+                LocalDeletionRemoteFolder(db_item, _)
+                | LocalFileRemoteFolder(db_item, _)
+                | LocalDeletionRemoteFile(db_item, _)
+                | LocalItemRemoteFile(db_item, _)
+                | LocalItemRemoteDeletion(db_item, _) => {
+                    println!("Conflict: {:?}", db_item.path.to_path_buf());
+                    if choose_local {
+                        println!("Choosing local version over remote!");
+                        SyncConflictResolution::ChooseLocalItem
+                    } else if choose_remote {
+                        println!("Choosing remote version over local!");
+                        SyncConflictResolution::ChooseRemoteItem
+                    } else {
+                        println!("Do not resolve the conflict (re-run sync with --choose-local or --choose-remote)");
+                        SyncConflictResolution::DoNotResolve
+                    }
+                }
+            },
+        )
         .unwrap();
     println!("Sync Complete!");
 }
