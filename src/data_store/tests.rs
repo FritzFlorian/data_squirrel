@@ -705,6 +705,34 @@ fn multi_target_sync_with_ignores() {
     dir_should_contain(&fs_2, "", vec!["file-4", "file-5"]);
     dir_should_not_contain(&fs_2, "", vec!["file-1", "file-2", "file-3"]);
 
+    // Let's remove the ignore rules from data_store_2.
+    let mut new_rules_for_2 = data_store_2.get_inclusion_rules().clone();
+    new_rules_for_2.remove_rule("/file-1");
+    new_rules_for_2.remove_rule("/file-2");
+    data_store_2
+        .update_inclusion_rules(new_rules_for_2, false)
+        .unwrap();
+    // Now the sync should load over file-1 store 1 (as it holds it).
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_2, "", vec!["file-4", "file-5", "file-2"]);
+    dir_should_not_contain(&fs_2, "", vec!["file-1", "file-3"]);
+
+    // Let's remove the ignore rules from data_store_1.
+    let mut new_rules_for_1 = data_store_1.get_inclusion_rules().clone();
+    new_rules_for_1.remove_rule("/file-3");
+    new_rules_for_1.remove_rule("/file-4");
+    data_store_1
+        .update_inclusion_rules(new_rules_for_1, false)
+        .unwrap();
+    // Now the sync should load over file-4 store 2 (as it holds it).
+    data_store_1
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_1, "", vec!["file-4", "file-5", "file-2"]);
+    dir_should_not_contain(&fs_1, "", vec!["file-1", "file-3"]);
+
     // TODO: We still have a problematic state.
     //       If we sync from 1 -> 3 multiple times, without ever syncing from 2 -> 3,
     //       store 3 will never update its sync time of the folder, thus always try to re-fetch
