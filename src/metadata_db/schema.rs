@@ -23,6 +23,16 @@ table! {
 }
 
 table! {
+    inclusion_rules (id) {
+        id -> BigInt,
+        data_store_id -> BigInt,
+
+        rule_glob -> Text,
+        include -> Bool,
+    }
+}
+
+table! {
     path_components (id) {
         id -> BigInt,
         parent_id -> Nullable<BigInt>,
@@ -96,6 +106,8 @@ allow_tables_to_appear_in_same_query!(
 );
 
 joinable!(data_stores -> data_sets(data_set_id));
+
+joinable!(inclusion_rules -> data_stores(data_store_id));
 
 joinable!(items -> data_stores(data_store_id));
 joinable!(items -> path_components(path_component_id));

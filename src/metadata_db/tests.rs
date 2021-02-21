@@ -1,11 +1,11 @@
 use super::*;
 use chrono::NaiveDateTime;
 
-fn open_metadata_store() -> MetadataDB {
+pub fn open_metadata_store() -> MetadataDB {
     MetadataDB::open(":memory:").unwrap()
 }
 
-fn insert_sample_data_set(metadata_store: &MetadataDB) -> (DataSet, DataStore) {
+pub fn insert_sample_data_set(metadata_store: &MetadataDB) -> (DataSet, DataStore) {
     let data_set = metadata_store.create_data_set("abc").unwrap();
     let data_store = insert_data_store(&metadata_store, &data_set, "abc", true);
 
@@ -198,26 +198,26 @@ fn correctly_enter_data_items() {
     assert_mod_time(&metadata_store, "", data_store.id, 0);
 
     insert_data_item(&metadata_store, "sub", false);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 1);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 2);
 
     insert_data_item(&metadata_store, "sub/folder", false);
-    assert_mod_time(&metadata_store, "sub/folder", data_store.id, 2);
-
-    insert_data_item(&metadata_store, "sub/folder/file", true);
-    assert_mod_time(&metadata_store, "sub/folder/file", data_store.id, 3);
-
-    // Parent folders get updated correctly
-    assert_mod_time(&metadata_store, "", data_store.id, 3);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 3);
     assert_mod_time(&metadata_store, "sub/folder", data_store.id, 3);
 
+    insert_data_item(&metadata_store, "sub/folder/file", true);
+    assert_mod_time(&metadata_store, "sub/folder/file", data_store.id, 4);
+
+    // Parent folders get updated correctly
+    assert_mod_time(&metadata_store, "", data_store.id, 4);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 4);
+    assert_mod_time(&metadata_store, "sub/folder", data_store.id, 4);
+
     // The database is invariant on capitalization when searching or inserting items
-    assert_mod_time(&metadata_store, "", data_store.id, 3);
-    assert_mod_time(&metadata_store, "sUb", data_store.id, 3);
-    assert_mod_time(&metadata_store, "sub/FolDer", data_store.id, 3);
+    assert_mod_time(&metadata_store, "", data_store.id, 4);
+    assert_mod_time(&metadata_store, "sUb", data_store.id, 4);
+    assert_mod_time(&metadata_store, "sub/FolDer", data_store.id, 4);
 
     insert_data_item(&metadata_store, "sUb", false);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 4);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 5);
 
     // Check if child queries work
     let children = metadata_store
@@ -240,7 +240,7 @@ fn correctly_enter_data_items() {
 
     // Create new files 'over' an previous deletion notice.
     insert_data_item(&metadata_store, "SUB", false);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 8);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 9);
 
     // TODO: Clean up deletion notices and re-query child items!
 }
@@ -393,7 +393,7 @@ fn correctly_inserts_synced_data_items() {
     let root_item_after_update = metadata_store
         .get_local_data_item(&RelativePath::from_path(""), true)
         .unwrap();
-    assert_eq!(root_item_after_update.mod_time()[&local_store.id], 3);
+    assert_eq!(root_item_after_update.mod_time()[&local_store.id], 4);
     assert_eq!(root_item_after_update.mod_time()[&remote_store.id], 42);
 
     // Try a more complicated case where we change a folder to be a file
@@ -503,7 +503,7 @@ fn transfer_significant_sync_times() {
     // (this tests the creating of path_components in the enter_significant_sync_times_for call).
     delete_data_item(&metadata_store, "file-0");
     delete_data_item(&metadata_store, "folder-1/file-3");
-    metadata_store.clean_up().unwrap();
+    metadata_store.optimize_db().unwrap();
 
     // Simulate that we get to know the remote stores view of the system (which was what we
     // initially setup for this test before deleting the items).
@@ -562,4 +562,42 @@ fn assert_remote_sync_time(
     for (store_id, time) in sync_time.iter() {
         assert_eq!(db_sync_time[store_id], *time);
     }
+}
+
+#[test]
+fn store_inclusion_rules() {
+    let metadata_store = open_metadata_store();
+    let (_data_set, data_store) = insert_sample_data_set(&metadata_store);
+
+    let mut rules = metadata_store.get_inclusion_rules(&data_store).unwrap();
+    assert_eq!(
+        rules,
+        vec![DBInclusionRule {
+            include: true,
+            rule: glob::Pattern::new("**").unwrap()
+        }]
+    );
+
+    rules.push(DBInclusionRule {
+        include: false,
+        rule: glob::Pattern::new("/file-1").unwrap(),
+    });
+    metadata_store
+        .set_inclusion_rules(&data_store, &rules)
+        .unwrap();
+    let required_rules = metadata_store.get_inclusion_rules(&data_store).unwrap();
+    assert_eq!(rules, required_rules);
+
+    rules.pop();
+    rules.pop();
+    rules.push(DBInclusionRule {
+        include: true,
+        rule: glob::Pattern::new("/sub_dir").unwrap(),
+    });
+
+    metadata_store
+        .set_inclusion_rules(&data_store, &rules)
+        .unwrap();
+    let required_rules = metadata_store.get_inclusion_rules(&data_store).unwrap();
+    assert_eq!(rules, required_rules);
 }

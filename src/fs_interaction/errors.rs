@@ -7,10 +7,6 @@ pub enum FSInteractionError {
     MetadataDirAlreadyExists,
     MetadataDirAlreadyOpened,
     SoftLinksForbidden,
-    // Issues when compiling ignore rules
-    IgnoreRuleError {
-        source: glob::PatternError,
-    },
     // IOError is simply our 'catch all' error type for 'non-special' issues
     IOError {
         source: io::Error,
@@ -40,11 +36,6 @@ impl From<io::Error> for FSInteractionError {
         }
     }
 }
-impl From<glob::PatternError> for FSInteractionError {
-    fn from(error: glob::PatternError) -> Self {
-        Self::IgnoreRuleError { source: error }
-    }
-}
 impl fmt::Display for FSInteractionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Error when accessing the FS ({:?})", self)
@@ -54,7 +45,6 @@ impl Error for FSInteractionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::IOError { ref source, .. } => Some(source),
-            Self::IgnoreRuleError { ref source } => Some(source),
             Self::MetadataDirAlreadyExists => None,
             Self::SoftLinksForbidden => None,
             Self::MetadataDirAlreadyOpened => None,

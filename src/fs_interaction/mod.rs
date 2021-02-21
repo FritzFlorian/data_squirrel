@@ -9,13 +9,12 @@ pub use self::errors::*;
 use filetime::FileTime;
 use ring::digest::{Context, SHA256};
 use std::io;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const METADATA_DIR: &str = ".__data_squirrel__";
 const METADATA_DB_FILE: &str = "database.sqlite";
 const LOCK_FILE: &str = "lock";
-const IGNORE_FILE: &str = "ignored.txt";
 const PENDING_FILES_DIR: &str = "pending_files";
 const SNAPSHOT_DIR: &str = "snapshots";
 
@@ -52,9 +51,7 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
             ignore_rules: vec![],
         };
         result.acquire_exclusive_lock()?;
-
         result.ensure_metadata_dirs_exist()?;
-        result.reload_ignore_rules()?;
 
         Ok(result)
     }
@@ -127,12 +124,10 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
 
             // Create basic data_item for remaining, valid entries.
             let relative_path = relative_path.join(file_name.to_string());
-            let path_ignored = self.is_ignored(&relative_path);
             let mut data_item = DataItem {
                 relative_path: relative_path,
                 metadata: None,
                 issue: None,
-                ignored: path_ignored,
             };
 
             // Check if item is a duplicate (when ignoring case in names).
@@ -306,53 +301,6 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         Ok(())
     }
 
-    /// Reloads the ignore rules from their file.
-    /// Creates the ignore rules file if it does not exist already.
-    pub fn reload_ignore_rules(&mut self) -> Result<()> {
-        let result = self.fs.create_file(self.ignore_path());
-        if result.is_err()
-            && result.as_ref().err().unwrap().kind() != std::io::ErrorKind::AlreadyExists
-        {
-            // Escalate up if there are errors, if it simply exists we are good.
-            result?
-        }
-
-        self.ignore_rules.clear();
-        let rules_file_stream = self.fs.read_file(self.ignore_path())?;
-        let buf_reader = BufReader::new(rules_file_stream);
-        for line in buf_reader.lines() {
-            let line = line?;
-            if line.is_empty() {
-                continue;
-            }
-
-            let glob_pattern = glob::Pattern::new(&line)?;
-            self.ignore_rules.push(glob_pattern);
-        }
-
-        Ok(())
-    }
-
-    pub fn add_ignore_rule(&mut self, rule: &str, add_permanent: bool) -> Result<()> {
-        let glob_pattern = glob::Pattern::new(rule)?;
-
-        self.ignore_rules.push(glob_pattern);
-        if add_permanent {
-            let rule_line = format!("{:}\n", rule);
-            let rule_box = Box::new(rule_line.as_bytes());
-            self.fs.append_file(self.ignore_path(), rule_box)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn is_ignored(&self, path: &RelativePath) -> bool {
-        let path_string = path.get_path_components().join("/");
-        self.ignore_rules
-            .iter()
-            .any(|rule| rule.matches(&path_string))
-    }
-
     // Creates the lock dot-file.
     fn acquire_exclusive_lock(&mut self) -> Result<()> {
         if self.locked {
@@ -397,10 +345,6 @@ impl<FS: virtual_fs::FS> FSInteraction<FS> {
         self.metadata_path().join(LOCK_FILE)
     }
 
-    fn ignore_path(&self) -> PathBuf {
-        self.metadata_path().join(IGNORE_FILE)
-    }
-
     pub fn pending_files_dir(&self) -> PathBuf {
         self.metadata_path().join(PENDING_FILES_DIR)
     }
@@ -434,7 +378,6 @@ pub struct DataItem {
     pub relative_path: RelativePath,
     pub metadata: Option<virtual_fs::Metadata>,
     pub issue: Option<Issue>,
-    pub ignored: bool,
 }
 
 #[derive(PartialEq, Debug)]

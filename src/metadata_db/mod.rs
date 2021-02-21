@@ -8,6 +8,8 @@ mod queries;
 // External representation of the DB.
 mod db_item;
 pub use self::db_item::*;
+mod db_inclusion_rule;
+pub use self::db_inclusion_rule::*;
 // Error boilerplate
 mod errors;
 pub use self::errors::*;
@@ -54,14 +56,21 @@ impl MetadataDB {
     }
 
     /// Performs a clean-up operation on the local database, removing any redundant information.
+    /// Also re-builds the DB to shrink the file size and analyze it for future queries.
     /// Should be run from time to time to decrease the DB size on disk.
-    pub fn clean_up(&self) -> Result<()> {
+    pub fn optimize_db(&self) -> Result<()> {
+        self.clean_up_db()?;
+        diesel::sql_query("ANALYZE").execute(&self.conn)?;
+        diesel::sql_query("VACUUM").execute(&self.conn)?;
+
+        Ok(())
+    }
+
+    /// Performs a clean-up operation on the local database, removing any redundant information.
+    pub fn clean_up_db(&self) -> Result<()> {
         self.clean_up_local_sync_times()?;
         self.clean_up_deleted_items()?;
         self.clean_up_path_components()?;
-
-        diesel::sql_query("ANALYZE").execute(&self.conn)?;
-        diesel::sql_query("VACUUM").execute(&self.conn)?;
 
         Ok(())
     }
@@ -70,21 +79,44 @@ impl MetadataDB {
     // This means, that the inner function is run inside a transaction and that we will turn off
     // any nested transactions. In other words, all actions done inside are either executed as a
     // unit or not at all.
-    // The main purpose of this is performance in certain situations, as we can bundle e.g.
-    // operations that update multiple items in a folder.
+    // As a regular transaction, rolls back all changes if an error is returned.
     pub fn run_bundled<F: FnMut() -> std::result::Result<V, E>, V, E>(
         &self,
         mut func: F,
     ) -> Result<std::result::Result<V, E>> {
-        let inner_result = self.run_transaction(|| {
+        enum InnerError<V, E> {
+            Inner(std::result::Result<V, E>),
+            SqlError { source: diesel::result::Error },
+        }
+        impl<V, E> From<diesel::result::Error> for InnerError<V, E> {
+            fn from(error: diesel::result::Error) -> Self {
+                Self::SqlError { source: error }
+            }
+        }
+
+        let inner_result = self.conn.transaction(|| {
             *self.is_bundled.borrow_mut() = true;
-            let inner_result = func();
+            let result = func();
             *self.is_bundled.borrow_mut() = false;
 
-            Ok(inner_result)
-        })?;
+            // Simulate an error in case the internal function errored out.
+            // This will rollback the transaction.
+            if result.is_err() {
+                Err(InnerError::Inner(result))
+            } else {
+                Ok(result)
+            }
+        });
 
-        Ok(inner_result)
+        // In case we had an db error on the transaction, return that.
+        // In all other cases, return the inner functions result.
+        match inner_result {
+            Ok(result) => Ok(result),
+            Err(InnerError::Inner(result)) => Ok(result),
+            Err(InnerError::SqlError { source }) => {
+                Err(MetadataDBError::GenericSQLError { source })
+            }
+        }
     }
     fn run_transaction<F: FnMut() -> Result<R>, R>(&self, mut func: F) -> Result<R> {
         if *self.is_bundled.borrow_mut() {
@@ -153,6 +185,55 @@ impl MetadataDB {
         Ok(result)
     }
 
+    /// Returns a vector of file inclusion rules for the given data store.
+    /// This represents our knowledge of the remote data stores inclusion/exclusion rules.
+    pub fn get_inclusion_rules(&self, data_store: &DataStore) -> Result<Vec<DBInclusionRule>> {
+        let result = inclusion_rules::table
+            .filter(inclusion_rules::data_store_id.eq(data_store.id))
+            .load::<InclusionRule>(&self.conn)?
+            .into_iter()
+            .map(|db_entry| DBInclusionRule {
+                rule: glob::Pattern::new(&db_entry.rule_glob).unwrap(),
+                include: db_entry.include,
+            })
+            .collect();
+        Ok(result)
+    }
+
+    /// Sets the file inclusion rules for the given data store.
+    /// Validation that the rules are valid glob patterns must be performed externally!
+    pub fn set_inclusion_rules(
+        &self,
+        data_store: &DataStore,
+        rules: &Vec<DBInclusionRule>,
+    ) -> Result<()> {
+        self.conn.transaction(|| {
+            diesel::delete(
+                inclusion_rules::table.filter(inclusion_rules::data_store_id.eq(data_store.id)),
+            )
+            .execute(&self.conn)?;
+
+            let new_rules: Vec<_> = rules
+                .iter()
+                .map(|rule| inclusion_rule::InsertFull {
+                    data_store_id: data_store.id,
+                    rule_glob: rule.rule.to_string(),
+                    include: rule.include,
+                })
+                .collect();
+            diesel::insert_into(inclusion_rules::table)
+                .values(new_rules)
+                .execute(&self.conn)?;
+
+            // We bump our local time counter when changing these rules.
+            // That way, others can notice that our database changed even without a new
+            // file modification event.
+            self.increase_local_time()?;
+
+            Ok(())
+        })
+    }
+
     /// Creates a new data store in the open MetadataDB.
     /// At most one data store must be the local one and this methods reports an consistency
     /// error if violated.
@@ -184,6 +265,7 @@ impl MetadataDB {
             // (This simplifies A LOT of functions, as we spare the special case for no parent dir).
             if data_store.is_this_store {
                 self.create_root_item(&inserted_data_store)?;
+                self.create_include_all_glob(&inserted_data_store)?;
             }
 
             Ok(inserted_data_store)
@@ -459,7 +541,6 @@ impl MetadataDB {
     /// Does not affect any modification times.
     pub fn ignore_local_data_item(&self, path: &RelativePath) -> Result<()> {
         self.run_transaction(|| {
-            // We insert an item, bump the data stores version and mark all events with the version.
             let local_data_store = self.get_local_data_store()?;
 
             // Look for the item.
@@ -485,6 +566,68 @@ impl MetadataDB {
                 })
             }
         })
+    }
+
+    /// LOCAL DATA STORE EVENT, i.e. this is used to record changes of local data_items on disk.
+    ///
+    /// Marks the given data item (and all its child items) as 'reset',
+    /// i.e. the items are set to an initial clean state, with no information on them.
+    /// This means, that for all items we will have deletion notices at time 0.
+    ///
+    /// Does not affect any modification times.
+    pub fn reset_local_data_item(&self, path: &RelativePath) -> Result<()> {
+        self.run_transaction(|| {
+            let local_data_store = self.get_local_data_store()?;
+
+            // Look for the item.
+            let path_items = self.load_data_items_on_path(&local_data_store, &path, true)?;
+            let (_parent_dir_item, existing_item) =
+                Self::extract_parent_dir_and_item(&path_items, path.path_component_number())?;
+
+            if let Some(existing_item) = existing_item {
+                // An entry exists. Delete all its children and mark it deleted...
+                self.delete_child_db_entries(&existing_item)?;
+                diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
+                    .set(items::file_type.eq(FileType::DELETED))
+                    .execute(&self.conn)?;
+                self.delete_item_metadata(&existing_item)?;
+                // ...the last step is to reset the sync time of the item and all its parent items
+                // down to a zero vector. This requires 'bubbling' up the change and setting
+                // all other children's sync times on the way.
+                self.reset_sync_time_recursive(path_items)?;
+
+                self.notify_change_for_optimization()?;
+                Ok(())
+            } else {
+                Err(MetadataDBError::ViolatesDBConsistency {
+                    message: "Must not ignore non-existing items!",
+                })
+            }
+        })
+    }
+
+    fn reset_sync_time_recursive(&self, mut path_items: Vec<DBItemInternal>) -> Result<()> {
+        let current_item = path_items.pop();
+
+        if let Some(current_item) = current_item {
+            // Explicitly write the sync time vector to the child items, so we loose nothing
+            // when resetting the parents sync time to zero.
+            let child_items = self.load_child_items(&current_item, true)?;
+            for child_item in child_items {
+                let mut child_sync_time = child_item.sync_time.unwrap();
+                child_sync_time.max(&current_item.sync_time.as_ref().unwrap());
+                self.update_sync_times(&child_item.item, &child_sync_time)?;
+            }
+
+            // Recurse up, this will also set the sync time of current_item.
+            self.reset_sync_time_recursive(path_items)?;
+
+            // Now reset the sync time of current_item to 0 (deleting entries equal zero entries).
+            diesel::delete(sync_times::table.filter(sync_times::item_id.eq(current_item.item.id)))
+                .execute(&self.conn)?;
+        }
+
+        Ok(())
     }
 
     /// Syncs a local data item, i.e. updating its metadata, sync- and mod time.
@@ -1247,6 +1390,18 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Inserts the default 'include all glob' to the inclusion rules.
+    fn create_include_all_glob(&self, data_store: &DataStore) -> Result<()> {
+        self.set_inclusion_rules(
+            &data_store,
+            &vec![DBInclusionRule {
+                include: true,
+                rule: glob::Pattern::new("**").unwrap(),
+            }],
+        )?;
+        Ok(())
+    }
+
     /// Upgrades the DB to the most recent schema version.
     fn upgrade_db(&self) -> db_migration::Result<()> {
         self.conn
@@ -1283,4 +1438,4 @@ impl MetadataDB {
 }
 
 #[cfg(test)]
-mod tests;
+pub mod tests;

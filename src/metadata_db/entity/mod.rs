@@ -13,6 +13,8 @@ pub mod mod_metadata;
 pub use self::mod_metadata::ModMetadata;
 pub mod item;
 pub use self::item::Item;
+pub mod inclusion_rule;
+pub use self::inclusion_rule::InclusionRule;
 pub mod mod_time;
 pub use self::mod_time::ModTime;
 pub mod sync_time;

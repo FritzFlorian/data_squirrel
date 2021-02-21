@@ -1,5 +1,6 @@
 use super::*;
 use fs_interaction::virtual_fs::{InMemoryFS, FS};
+use glob::Pattern;
 use std::fs::File;
 use std::io::Write;
 use std::thread::sleep;
@@ -68,7 +69,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 6);
+    assert_eq!(data_store_1.local_time().unwrap(), 7);
 
     // Detect new and changed files
     in_memory_fs.create_file("file-3").unwrap();
@@ -86,7 +87,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 8);
+    assert_eq!(data_store_1.local_time().unwrap(), 9);
 
     // Detect deleted files and directories
     in_memory_fs.remove_file("file-1").unwrap();
@@ -104,7 +105,7 @@ fn scan_data_store_directory() {
             deleted_items: 2,
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 10);
+    assert_eq!(data_store_1.local_time().unwrap(), 11);
 
     // Re-add some
     in_memory_fs.create_file("file-1").unwrap();
@@ -120,7 +121,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 13);
+    assert_eq!(data_store_1.local_time().unwrap(), 14);
 
     // Changes in capitalization should be recognized as metadata changes
     in_memory_fs.rename("file-1", "FILE-1").unwrap();
@@ -137,7 +138,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 16);
+    assert_eq!(data_store_1.local_time().unwrap(), 17);
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
@@ -148,7 +149,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 16);
+    assert_eq!(data_store_1.local_time().unwrap(), 17);
 }
 
 #[test]
@@ -170,7 +171,7 @@ fn exclude_ignored_files_during_scan() {
 
     // Ignore just sub-3 for now.
     data_store_1
-        .add_scan_ignore_rule("**/sub-3", false)
+        .add_ignore_rule(Pattern::new("**/sub-3").unwrap())
         .unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
@@ -183,66 +184,46 @@ fn exclude_ignored_files_during_scan() {
         }
     );
 
-    // Detect we do not want to detect these changes, both should fall under the new ignore rules.
+    // Detect we do not want to detect these changes, all should fall under the new ignore rules.
     in_memory_fs
         .test_increase_file_mod_time("sub-1/sub-3/file-3")
         .unwrap();
     in_memory_fs.create_file("sub-1/file-2").unwrap();
-    // This change on the other hand should be detected.
     in_memory_fs.test_increase_file_mod_time("file-2").unwrap();
 
-    // NOTE: we do NOT EXPECT to remove existing indexed files. We just never want to add new ones
-    //       when we added them to the scan ignore rules.
-    //       Think of this a lot like git ignore files: once you staged files they wont go away.
-    data_store_1
-        .add_scan_ignore_rule("**/file-2", false)
+    // NOTE: we DO EXPECT to remove existing indexed files. These should become ignored items.
+    let (_, ignored_items) = data_store_1
+        .add_ignore_rule(glob::Pattern::new("**/file-2").unwrap())
         .unwrap();
-    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(ignored_items.len(), 1);
     assert_eq!(
-        changes,
-        ScanResult {
-            indexed_items: 7, // We expect to 'see' the ignored file-2
-            changed_items: 1,
-            new_items: 0,
-            deleted_items: 0
-        }
+        ignored_items.first().unwrap().path,
+        RelativePath::from_path("file-2")
     );
-
-    // Deleting and re-creating an file should 'clear' it from the db and then
-    // the next re-index will ignore it.
-    in_memory_fs.remove_file("file-2").unwrap();
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 7,
-            changed_items: 0,
-            new_items: 0,
-            deleted_items: 1,
-        }
-    );
-    in_memory_fs.create_file("file-2").unwrap();
-    let changes = data_store_1.perform_full_scan().unwrap();
-    assert_eq!(
-        changes,
-        ScanResult {
-            indexed_items: 7,
+            indexed_items: 7, // We expect to 'see' the ignored file-2, but we do not index it.
             changed_items: 0,
             new_items: 0,
             deleted_items: 0
         }
     );
 
-    // Forget the scan ignore rules. Now we should see all the files again.
-    data_store_1.remove_temporary_ignore_rule().unwrap();
+    // Un-ignoring an file should 'clear' it from the db and then the next re-index will see it.
+    let mut rules = data_store_1.get_inclusion_rules().clone();
+    rules.remove_rule("**/file-2");
+    data_store_1.update_inclusion_rules(rules, false).unwrap();
+
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
         ScanResult {
-            indexed_items: 8,
+            indexed_items: 7,
             changed_items: 0,
-            new_items: 4,
-            deleted_items: 0
+            new_items: 2,
+            deleted_items: 0,
         }
     );
 }
@@ -662,10 +643,18 @@ fn multi_target_sync_with_ignores() {
     fs_2.create_file("file-4").unwrap();
 
     // Now comes the interesting part. The two stores enforce th sharding, the ignore the other data.
-    data_store_1.add_scan_ignore_rule("/file-3", false).unwrap();
-    data_store_1.add_scan_ignore_rule("/file-4", false).unwrap();
-    data_store_2.add_scan_ignore_rule("/file-1", false).unwrap();
-    data_store_2.add_scan_ignore_rule("/file-2", false).unwrap();
+    data_store_1
+        .add_ignore_rule(Pattern::new("/file-3").unwrap())
+        .unwrap();
+    data_store_1
+        .add_ignore_rule(Pattern::new("/file-4").unwrap())
+        .unwrap();
+    data_store_2
+        .add_ignore_rule(Pattern::new("/file-1").unwrap())
+        .unwrap();
+    data_store_2
+        .add_ignore_rule(Pattern::new("/file-2").unwrap())
+        .unwrap();
 
     // Index all.
     data_store_1.perform_full_scan().unwrap();
@@ -726,6 +715,59 @@ fn multi_target_sync_with_ignores() {
     //       The hard part about all these operations are implicit deletion notices.
     //       We must NEVER increase the parent sync time without having all entries in it,
     //       as a missing entry with a higher sync time creates an implicit deletion.
+}
+
+#[test]
+fn detect_ignore_status_changes() {
+    let (fs_1, mut data_store_1) = create_in_memory_store();
+
+    // Two stores have a 'split' data set, i.e. they contain exclusive files (think sharding data).
+    fs_1.create_file("file-1").unwrap();
+    fs_1.create_file("file-2").unwrap();
+    fs_1.create_dir("sub", false).unwrap();
+    fs_1.create_file("sub/file-1").unwrap();
+    fs_1.create_file("sub/file-2").unwrap();
+    data_store_1.perform_full_scan().unwrap();
+
+    // We indexed everything to be included expect **/file-3, try some other ignore patterns.
+    let mut rules_1 = data_store_1.get_inclusion_rules().clone();
+    rules_1.add_ignore_rule(glob::Pattern::new("**/file-1").unwrap());
+    let rules_1_copy = rules_1.clone();
+
+    let (new_items, removed_items) = data_store_1.update_inclusion_rules(rules_1, false).unwrap();
+    assert_eq!(new_items.len(), 0);
+    assert_eq!(removed_items.len(), 2);
+    assert!(removed_items
+        .iter()
+        .all(|item| item.path.name() == "file-1"));
+
+    let mut rules_2 = data_store_1.get_inclusion_rules().clone();
+    rules_2.add_ignore_rule(glob::Pattern::new("**/sub").unwrap());
+    let (new_items, removed_items) = data_store_1.update_inclusion_rules(rules_2, false).unwrap();
+    assert_eq!(new_items.len(), 0);
+    assert_eq!(removed_items.len(), 2);
+    assert!(removed_items
+        .iter()
+        .all(|item| item.path.name() == "file-2" || item.path.name() == "sub"));
+
+    // Lets see the effect of 'un-ignoring' files.
+    let (new_items, removed_items) = data_store_1
+        .update_inclusion_rules(rules_1_copy, false)
+        .unwrap();
+    assert_eq!(new_items.len(), 1);
+    assert_eq!(new_items.first().unwrap().path.name(), "sub");
+    assert_eq!(removed_items.len(), 0);
+    // The scan should pick-up the 'un-ignored' items as new items.
+    let changes = data_store_1.perform_full_scan().unwrap();
+    assert_eq!(
+        changes,
+        ScanResult {
+            indexed_items: 5,
+            changed_items: 0,
+            new_items: 2,
+            deleted_items: 0
+        }
+    );
 }
 
 fn create_synced_base_state() -> (

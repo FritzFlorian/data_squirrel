@@ -4,6 +4,8 @@ pub fn migrate(conn: &SqliteConnection) -> Result<()> {
     create_table_data_sets(&conn)?;
     create_table_data_stores(&conn)?;
 
+    create_table_inclusion_rules(&conn)?;
+
     create_table_path_components(&conn)?;
     create_table_item(&conn)?;
 
@@ -51,6 +53,25 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
 
                 UNIQUE(unique_name),
                 FOREIGN KEY(data_set_id)    REFERENCES data_sets(id)
+             )",
+    )
+    .execute(conn)?;
+
+    Ok(())
+}
+
+// An inclusion rule decides if we want to keep a given file in our local data store.
+fn create_table_inclusion_rules(conn: &SqliteConnection) -> Result<()> {
+    sql_query(
+        "CREATE TABLE inclusion_rules(
+                id                  INTEGER PRIMARY KEY NOT NULL,
+                data_store_id       INTEGER NOT NULL,
+
+                rule_glob           TEXT NOT NULL,
+                include             INTEGER NOT NULL,
+
+                UNIQUE(rule_glob),
+                FOREIGN KEY(data_store_id)    REFERENCES data_stores(id)
              )",
     )
     .execute(conn)?;

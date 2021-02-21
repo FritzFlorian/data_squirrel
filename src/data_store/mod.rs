@@ -10,6 +10,8 @@ use crate::metadata_db;
 use crate::metadata_db::MetadataDB;
 use crate::version_vector::VersionVector;
 
+mod inclusion_rules;
+use self::inclusion_rules::*;
 mod synchronization_messages;
 use self::synchronization_messages::*;
 mod scan_result;
@@ -28,6 +30,7 @@ use metadata_db::{DBItem, ItemFSMetadata};
 pub struct DataStore<FS: virtual_fs::FS> {
     fs_access: FSInteraction<FS>,
     db_access: MetadataDB,
+    local_inclusion_rules: InclusionRules,
 }
 pub type DefaultDataStore = DataStore<virtual_fs::WrapperFS>;
 
@@ -44,8 +47,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         let fs_interaction = FSInteraction::open_with_fs(&path, fs)?;
         let metadata_db = MetadataDB::open(fs_interaction.metadata_db_path().to_str().unwrap())?;
 
+        let mut inclusion_rules = InclusionRules::new(&metadata_db.get_local_data_store()?);
+        inclusion_rules.load_from_db(&metadata_db)?;
         Ok(Self {
             fs_access: fs_interaction,
+            local_inclusion_rules: inclusion_rules,
             db_access: metadata_db,
         })
     }
@@ -99,8 +105,11 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             time: 0,
         })?;
 
+        let mut inclusion_rules = InclusionRules::new(&metadata_db.get_local_data_store()?);
+        inclusion_rules.load_from_db(&metadata_db)?;
         Ok(Self {
             fs_access: fs_interaction,
+            local_inclusion_rules: inclusion_rules,
             db_access: metadata_db,
         })
     }
@@ -128,22 +137,125 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     /// Tries to optimize the database file.
     /// This generally shrinks its size and slightly improves performance.
     pub fn optimize_database(&self) -> Result<()> {
-        self.db_access.clean_up()?;
+        self.db_access.optimize_db()?;
         Ok(())
     }
 
-    /// Adds a glob rule to the ignored files during a normal file system scan.
-    pub fn add_scan_ignore_rule(&mut self, rule: &str, persist_rule: bool) -> Result<()> {
-        self.fs_access.add_ignore_rule(rule, persist_rule)?;
+    /// Gets the local inclusion rules.
+    pub fn get_inclusion_rules(&self) -> &InclusionRules {
+        &self.local_inclusion_rules
+    }
 
+    /// Updates the local inclusion rules.
+    /// To be included, a file must match AT LEAST ONE inclusion rule and NO exclusion rule.
+    ///
+    /// Updating the inclusion rules will have direct affect on the DB content.
+    /// Newly ignored items (e.g. files that now match an ignore pattern or files that no longer
+    /// match any inclusion rule) will be changed to 'ignored' in the DB.
+    /// Returns a list of newly ignored items, to e.g. also remove the on-disk content if
+    /// adding rules to achieve effects like selective syncs.
+    ///
+    /// If you want to preview the changes made by new ignore rules before, set dry_run=true.
+    /// No changes are made to the DB, only the affected DBItems are returned.
+    pub fn update_inclusion_rules(
+        &mut self,
+        new_rules: InclusionRules,
+        dry_run: bool,
+    ) -> Result<(Vec<DBItem>, Vec<DBItem>)> {
+        let transaction_result: Result<_> = self.db_access.run_bundled(|| {
+            let (no_longer_ignored, newly_ignored) =
+                self.find_inclusion_status_changes(&new_rules, &RelativePath::from_path(""))?;
+            // If we want to apply the changes, we need to ignore newly ignored items in the DB
+            // and reset no longer items in the DB.
+            if !dry_run {
+                for item in &newly_ignored {
+                    self.db_access.ignore_local_data_item(&item.path)?;
+                }
+                for item in &no_longer_ignored {
+                    self.db_access.reset_local_data_item(&item.path)?;
+                }
+                // After adding new rules, we always want to clean up the DB.
+                // This is a long running operation right now anyways, so not much is lost.
+                // Additionally, there are many changes in sync/mod time structures, that are
+                // worth being cleaned up.
+                new_rules.store_to_db(&self.db_access)?;
+                self.db_access.clean_up_db()?;
+            }
+
+            Ok((no_longer_ignored, newly_ignored))
+        })?;
+        // Must 'unbundle' the inner result, to not assign new local_inclusion rules if the
+        // transaction fails. We can not assign the inclusion rules in the transaction, due to
+        // borrowing rules (need a mutable copy of self, while we use an immutable one).
+        let changed_items = transaction_result?;
+        if !dry_run {
+            self.local_inclusion_rules = new_rules;
+        }
+        Ok(changed_items)
+    }
+
+    fn find_inclusion_status_changes(
+        &self,
+        new_rules: &InclusionRules,
+        path: &RelativePath,
+    ) -> Result<(Vec<DBItem>, Vec<DBItem>)> {
+        let mut no_longer_ignored = vec![];
+        let mut newly_ignored = vec![];
+
+        let child_items = self.db_access.get_local_child_items(&path, false)?;
+        for child_item in child_items {
+            let included_by_new_rules = new_rules.is_included(&child_item.path);
+            if included_by_new_rules && child_item.is_ignored() {
+                no_longer_ignored.push(child_item);
+            } else if !included_by_new_rules && !child_item.is_ignored() {
+                if child_item.is_folder() {
+                    self.add_not_ignored_child_items(&mut newly_ignored, &child_item.path)?;
+                }
+                newly_ignored.push(child_item);
+            } else if child_item.is_folder() {
+                let (mut child_no_longer_ignored, mut child_newly_ignored) =
+                    self.find_inclusion_status_changes(&new_rules, &child_item.path)?;
+                no_longer_ignored.append(&mut child_no_longer_ignored);
+                newly_ignored.append(&mut child_newly_ignored);
+            }
+        }
+
+        Ok((no_longer_ignored, newly_ignored))
+    }
+
+    fn add_not_ignored_child_items(
+        &self,
+        newly_ignored: &mut Vec<DBItem>,
+        path: &RelativePath,
+    ) -> Result<()> {
+        let child_items = self.db_access.get_local_child_items(&path, false)?;
+        for child_item in child_items {
+            if !child_item.is_ignored() {
+                if child_item.is_folder() {
+                    self.add_not_ignored_child_items(newly_ignored, &child_item.path)?;
+                }
+                newly_ignored.push(child_item);
+            }
+        }
         Ok(())
     }
 
-    /// Removes temporary ignore rules (re-loads the rules from disk).
-    pub fn remove_temporary_ignore_rule(&mut self) -> Result<()> {
-        self.fs_access.reload_ignore_rules()?;
+    /// Adds a glob rule to ignore all files matching the given pattern.
+    pub fn add_ignore_rule(&mut self, rule: glob::Pattern) -> Result<(Vec<DBItem>, Vec<DBItem>)> {
+        let mut new_rules = self.local_inclusion_rules.clone();
+        new_rules.add_ignore_rule(rule);
+        self.update_inclusion_rules(new_rules, false)
+    }
 
-        Ok(())
+    /// Adds a glob rule to include files matching the given pattern.
+    /// To be included, a file must match AT LEAST ONE inclusion rule and NO exclusion rule.
+    pub fn add_inclusion_rule(
+        &mut self,
+        rule: glob::Pattern,
+    ) -> Result<(Vec<DBItem>, Vec<DBItem>)> {
+        let mut new_rules = self.local_inclusion_rules.clone();
+        new_rules.add_inclusion_rule(rule);
+        self.update_inclusion_rules(new_rules, false)
     }
 
     /// Re-indexes the data stored in this data_store.
@@ -164,7 +276,6 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             relative_path: root_path,
             metadata: Some(root_metadata),
             issue: None,
-            ignored: false,
         };
 
         let mut scan_result = ScanResult::new();
@@ -552,7 +663,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         // We want to ignore the folder, but still add its metadata to the db.
-        if local_item.is_ignored() || self.fs_access.is_ignored(&localized_path.to_lower_case()) {
+        if !self
+            .local_inclusion_rules
+            .is_included(&localized_path.to_lower_case())
+        {
             let target_item = metadata_db::DBItem {
                 path: localized_path.clone(),
                 sync_time: sync_time,
@@ -733,7 +847,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         // We want to ignore the file, but still add its metadata to the db.
-        if local_item.is_ignored() || self.fs_access.is_ignored(&localized_path.to_lower_case()) {
+        if !self
+            .local_inclusion_rules
+            .is_included(&localized_path.to_lower_case())
+        {
             let target_item = metadata_db::DBItem {
                 path: localized_path.clone(),
                 sync_time: sync_time,
@@ -1084,7 +1201,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }
             }
             metadata_db::ItemType::DELETION { .. } => {
-                if fs_item.ignored {
+                if !self
+                    .local_inclusion_rules
+                    .is_included(&fs_item.relative_path.to_lower_case())
+                {
                     // Do not do anything with ignored files that have no DB entries!
                     listener(IgnoredNewItem(&fs_item));
                 } else {
@@ -1146,7 +1266,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 }
             }
             metadata_db::ItemType::DELETION { .. } => {
-                if fs_item.ignored {
+                if !self
+                    .local_inclusion_rules
+                    .is_included(&fs_item.relative_path.to_lower_case())
+                {
                     // Do not do anything with ignored files that have no DB entries!
                     listener(IgnoredNewItem(&fs_item));
                 } else {
