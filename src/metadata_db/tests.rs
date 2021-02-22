@@ -23,12 +23,15 @@ fn insert_data_store(
             data_set_id: data_set.id,
             unique_name: &unique_name,
             human_name: &"",
-            is_this_store: this_store,
-            time: 0,
 
             creation_date: &NaiveDateTime::from_timestamp(0, 0),
             path_on_device: &"/",
             location_note: &"",
+
+            is_this_store: this_store,
+            is_transfer_store: false,
+
+            time: 0,
         })
         .unwrap()
 }
@@ -168,7 +171,9 @@ fn clean_up_synced_deletions() {
     // We MUST keep 'folder-1' and '', as they are not deleted. Makes 4 total.
     metadata_store.clean_up_local_sync_times().unwrap();
     // Take a intermediate step: here we should be able to identify the 'significant sync times'
-    let significant_items = metadata_store.find_local_significant_sync_times().unwrap();
+    let significant_items = metadata_store
+        .find_significant_sync_times(&local_store)
+        .unwrap();
     assert_eq!(significant_items.len(), 4);
     assert!(significant_items
         .iter()
@@ -198,26 +203,26 @@ fn correctly_enter_data_items() {
     assert_mod_time(&metadata_store, "", data_store.id, 0);
 
     insert_data_item(&metadata_store, "sub", false);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 2);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 3);
 
     insert_data_item(&metadata_store, "sub/folder", false);
-    assert_mod_time(&metadata_store, "sub/folder", data_store.id, 3);
-
-    insert_data_item(&metadata_store, "sub/folder/file", true);
-    assert_mod_time(&metadata_store, "sub/folder/file", data_store.id, 4);
-
-    // Parent folders get updated correctly
-    assert_mod_time(&metadata_store, "", data_store.id, 4);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 4);
     assert_mod_time(&metadata_store, "sub/folder", data_store.id, 4);
 
+    insert_data_item(&metadata_store, "sub/folder/file", true);
+    assert_mod_time(&metadata_store, "sub/folder/file", data_store.id, 5);
+
+    // Parent folders get updated correctly
+    assert_mod_time(&metadata_store, "", data_store.id, 5);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 5);
+    assert_mod_time(&metadata_store, "sub/folder", data_store.id, 5);
+
     // The database is invariant on capitalization when searching or inserting items
-    assert_mod_time(&metadata_store, "", data_store.id, 4);
-    assert_mod_time(&metadata_store, "sUb", data_store.id, 4);
-    assert_mod_time(&metadata_store, "sub/FolDer", data_store.id, 4);
+    assert_mod_time(&metadata_store, "", data_store.id, 5);
+    assert_mod_time(&metadata_store, "sUb", data_store.id, 5);
+    assert_mod_time(&metadata_store, "sub/FolDer", data_store.id, 5);
 
     insert_data_item(&metadata_store, "sUb", false);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 5);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 6);
 
     // Check if child queries work
     let children = metadata_store
@@ -240,7 +245,7 @@ fn correctly_enter_data_items() {
 
     // Create new files 'over' an previous deletion notice.
     insert_data_item(&metadata_store, "SUB", false);
-    assert_mod_time(&metadata_store, "sub", data_store.id, 9);
+    assert_mod_time(&metadata_store, "sub", data_store.id, 10);
 
     // TODO: Clean up deletion notices and re-query child items!
 }
@@ -331,7 +336,7 @@ fn correctly_inserts_synced_data_items() {
     // First of, lets try bumping some synchronization vector times.
     bump_sync_time(
         &metadata_store,
-        VersionVector::from_initial_values(vec![(&remote_store.id, 10)]),
+        VersionVector::from_initial_values(vec![(&remote_store.id, 100)]),
         "sub",
     );
 
@@ -340,23 +345,23 @@ fn correctly_inserts_synced_data_items() {
     assert_eq!(cleaned_items, 1);
 
     assert_sync_time(&metadata_store, "", remote_store.id, 0);
-    assert_sync_time(&metadata_store, "sub", remote_store.id, 10);
-    assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 10);
+    assert_sync_time(&metadata_store, "sub", remote_store.id, 100);
+    assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 100);
 
     // Also try to 'partially' bump the sync times.
     bump_sync_time(
         &metadata_store,
-        VersionVector::from_initial_values(vec![(&local_store.id, 5), (&remote_store.id, 7)]),
+        VersionVector::from_initial_values(vec![(&local_store.id, 50), (&remote_store.id, 70)]),
         "",
     );
 
-    assert_sync_time(&metadata_store, "", remote_store.id, 7);
-    assert_sync_time(&metadata_store, "sub", remote_store.id, 10);
-    assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 10);
+    assert_sync_time(&metadata_store, "", remote_store.id, 70);
+    assert_sync_time(&metadata_store, "sub", remote_store.id, 100);
+    assert_sync_time(&metadata_store, "sub/folder/file", remote_store.id, 100);
 
-    assert_sync_time(&metadata_store, "", local_store.id, 5);
-    assert_sync_time(&metadata_store, "sub", local_store.id, 5);
-    assert_sync_time(&metadata_store, "sub/folder/file", local_store.id, 5);
+    assert_sync_time(&metadata_store, "", local_store.id, 50);
+    assert_sync_time(&metadata_store, "sub", local_store.id, 50);
+    assert_sync_time(&metadata_store, "sub/folder/file", local_store.id, 50);
 
     // We should not yet see any duplicated sync times, as we only change parent items directly.
     let cleaned_items = metadata_store.clean_up_local_sync_times().unwrap();
@@ -368,7 +373,7 @@ fn correctly_inserts_synced_data_items() {
         .unwrap();
 
     // ...this should be as if the second store overwrites the local one with a new version.
-    let new_mod_time = VersionVector::from_initial_values(vec![(&remote_store.id, 42)]);
+    let new_mod_time = VersionVector::from_initial_values(vec![(&remote_store.id, 420)]);
     let new_sync_time = VersionVector::from_initial_values(vec![(&remote_store.id, 1024)]);
     file.sync_time = new_sync_time;
 
@@ -386,15 +391,15 @@ fn correctly_inserts_synced_data_items() {
     let file_after_update = metadata_store
         .get_local_data_item(&RelativePath::from_path("sub/folder/file"), true)
         .unwrap();
-    assert_eq!(file_after_update.sync_time[&local_store.id], 5);
+    assert_eq!(file_after_update.sync_time[&local_store.id], 50);
     assert_eq!(file_after_update.sync_time[&remote_store.id], 1024);
     assert_eq!(file_after_update.mod_time()[&local_store.id], 0);
-    assert_eq!(file_after_update.mod_time()[&remote_store.id], 42);
+    assert_eq!(file_after_update.mod_time()[&remote_store.id], 420);
     let root_item_after_update = metadata_store
         .get_local_data_item(&RelativePath::from_path(""), true)
         .unwrap();
-    assert_eq!(root_item_after_update.mod_time()[&local_store.id], 4);
-    assert_eq!(root_item_after_update.mod_time()[&remote_store.id], 42);
+    assert_eq!(root_item_after_update.mod_time()[&local_store.id], 5);
+    assert_eq!(root_item_after_update.mod_time()[&remote_store.id], 420);
 
     // Try a more complicated case where we change a folder to be a file
     let mut folder = metadata_store
@@ -498,7 +503,9 @@ fn transfer_significant_sync_times() {
     //  thus sparing the rather expensive clean-up operation).
     metadata_store.clean_up_local_sync_times().unwrap();
     // Snapshot the local significant sync times.
-    let local_significant = metadata_store.find_local_significant_sync_times().unwrap();
+    let local_significant = metadata_store
+        .find_significant_sync_times(&local_store)
+        .unwrap();
     // Delete some local items and clean up their db entries
     // (this tests the creating of path_components in the enter_significant_sync_times_for call).
     delete_data_item(&metadata_store, "file-0");
@@ -508,7 +515,7 @@ fn transfer_significant_sync_times() {
     // Simulate that we get to know the remote stores view of the system (which was what we
     // initially setup for this test before deleting the items).
     metadata_store
-        .enter_significant_sync_times_for(&remote_store, local_significant)
+        .enter_significant_sync_times(&remote_store, local_significant)
         .unwrap();
 
     // Queries should now return the expected, initial state.

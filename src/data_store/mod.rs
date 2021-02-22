@@ -99,7 +99,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             unique_name: &format!("{:}-{:}", data_store_name, unique_id),
             human_name: data_store_name,
             creation_date: &chrono::Utc::now().naive_local(),
+
             is_this_store: true,
+            is_transfer_store: false,
+
             path_on_device: fs_interaction.root_path().to_str().unwrap(),
             location_note: "",
             time: 0,
@@ -138,6 +141,16 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     /// This generally shrinks its size and slightly improves performance.
     pub fn optimize_database(&self) -> Result<()> {
         self.db_access.optimize_db()?;
+        Ok(())
+    }
+
+    /// Marks the local store to be a 'transfer store', i.e. be used to deliver changes
+    /// from one store to another (MUST be first action on this store!).
+    pub fn mark_as_transfer_store(&self) -> Result<()> {
+        if self.local_time()? > 2 {
+            return Err(DataStoreError::OnlyCleanStoresCanBecomeTransfer);
+        }
+        self.db_access.mark_as_transfer_store()?;
         Ok(())
     }
 
@@ -269,6 +282,10 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     /// While doing these actions at all times the modification times in the DB are kept up to date,
     /// i.e. the local time counter is kept and attached to new or changed files.
     pub fn perform_full_scan(&self) -> Result<ScanResult> {
+        if self.db_access.is_transfer_store()? {
+            return Err(DataStoreError::MustNotScanTransferStores);
+        }
+
         let root_path = RelativePath::from_path("");
         let root_metadata = self.fs_access.metadata(&root_path)?;
 
@@ -303,7 +320,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
 
     /// Includes the data stores given into the local database and returns a list of all
     /// stores known after the operation.
-    /// This should be done before a item or folder is synced to make sure both data stores
+    /// This should be done before an item or folder is synced to make sure both data stores
     /// know about the same data stores related to the given data set.
     pub fn sync_data_store_list(&self, sync_handshake: SyncHandshake) -> Result<SyncHandshake> {
         let local_data_set = self.get_data_set()?;
@@ -327,7 +344,8 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                         path_on_device: &remote_data_store.path_on_device,
                         location_note: &remote_data_store.location_note,
                         is_this_store: false,
-                        time: remote_data_store.time,
+                        is_transfer_store: false,
+                        time: 0,
                     })?;
             }
         }
@@ -487,6 +505,105 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             &remote_mapper,
             sync_conflict,
         )?;
+
+        Ok(())
+    }
+
+    // Queries all 'newer' significant sync time info known by the other store.
+    // After the operation, the local store (self) will have the same knowledge about
+    // other stores in the system as the remote does.
+    pub fn get_significant_sync_times_from_other(&self, from_other: &Self) -> Result<usize> {
+        // TODO: Re-work this into a message based transfer.
+        //       This should be a simple task and be doable in any case. Thus, it really adds
+        //       nothing to the first prototype implementation other than overhead.
+
+        // Make sure we both know about the same stores, this will avoid some complications below.
+        let (local_mapper, _remote_mapper) = self.sync_data_store_lists(&from_other)?;
+        from_other.db_access.clean_up_db()?; // This way we NEVER get non-significant sync times.
+
+        let mut transferred_vectors = 0;
+        for other_store in from_other.db_access.get_data_stores()? {
+            let local_store = self
+                .db_access
+                .get_data_store(&other_store.unique_name)?
+                .unwrap(); // We did the handshake earlier. This 'could' be a timed race, fix later.
+            if local_store.time < other_store.time {
+                // Other store has something changed. Copy it to our DB.
+                // TODO: Copy all relevant properties (also human name, path, description, ...)
+
+                // Copy inclusion rules..
+                let inclusion_rules = from_other.db_access.get_inclusion_rules(&other_store)?;
+                self.db_access
+                    .set_inclusion_rules(&local_store, &inclusion_rules)?;
+                // Copy significant sync times...
+                let significant_sync_times: Vec<_> = from_other
+                    .db_access
+                    .find_significant_sync_times(&other_store)?
+                    .into_iter()
+                    .map(|(path, sync_time)| (path, local_mapper.external_to_internal(&sync_time)))
+                    .collect();
+                transferred_vectors += significant_sync_times.len();
+                self.db_access
+                    .enter_significant_sync_times(&local_store, significant_sync_times)?;
+                // Set the copied stores time to not re-transmit later...
+                self.db_access.update_data_store(
+                    &other_store.unique_name,
+                    other_store.time,
+                    &other_store.human_name,
+                    &other_store.location_note,
+                )?;
+            }
+        }
+        Ok(transferred_vectors)
+    }
+
+    /// Cleans out all local items that are no longer required on this transfer store, i.e.
+    /// the data was delivered to all targeted peers.
+    pub fn clean_transfer_store(&self) -> Result<()> {
+        // TODO: Recurse into local data items that are NOT ignored.
+        //       Check if we should ignore them. If so, do it and delete disk content.
+        let root_item = self
+            .db_access
+            .get_local_data_item(&RelativePath::from_path(""), true)?;
+        self.clean_transfer_store_recursive(&root_item)?;
+
+        Ok(())
+    }
+    fn clean_transfer_store_recursive(&self, item: &DBItem) -> Result<()> {
+        if item.is_ignored() {
+            return Ok(());
+        }
+
+        if self.should_ignore_item(&item.path, &item.mod_time())? {
+            // Do not delete the root directory.
+            if item.path.is_root() {
+                let child_items = self.db_access.get_local_child_items(&item.path, true)?;
+                for child_item in child_items {
+                    if child_item.is_folder() {
+                        self.fs_access.delete_directory(&child_item.path)?;
+                    } else if child_item.is_file() {
+                        self.fs_access.delete_file(&child_item.path)?;
+                    }
+                }
+            } else {
+                if item.is_folder() {
+                    self.fs_access.delete_directory(&item.path)?;
+                } else if item.is_file() {
+                    self.fs_access.delete_file(&item.path)?;
+                }
+            }
+
+            self.db_access.ignore_local_data_item(&item.path)?;
+            return Ok(());
+        }
+
+        if item.is_folder() {
+            let child_items = self.db_access.get_local_child_items(&item.path, true)?;
+            for child_item in child_items {
+                self.clean_transfer_store_recursive(&child_item)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -524,8 +641,21 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     where
         F: FnMut(SyncConflictEvent) -> SyncConflictResolution,
     {
+        // In case of a transfer store, we want to re-transfer ignored items
+        // if there is an update for them. Resetting them does this for us.
+        // Note: The current 'just delete' is somewhat in-efficient (we always check the ignore
+        //       rule two times, which is expensive). However, the overhead is reasonable
+        //       for a first implementation.
+        let mut local_item = self.db_access.get_local_data_item(&path, true)?;
+        if self.db_access.get_local_data_store()?.is_transfer_store && local_item.is_ignored() {
+            let should_ignore_item = self.should_ignore_item(&path, &local_item.mod_time())?;
+            if !should_ignore_item {
+                self.db_access.reset_local_data_item(&path)?;
+                local_item = self.db_access.get_local_data_item(&path, true)?;
+            }
+        }
+
         // STEP 1) Perform the synchronization request to the other data_store.
-        let local_item = self.db_access.get_local_data_item(&path, true)?;
         let localized_path = path
             .clone()
             .parent_mut()
@@ -590,6 +720,36 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                     ),
                 }
             }
+        }
+    }
+
+    fn should_ignore_item(
+        &self,
+        item_path: &RelativePath,
+        item_mod_time: &VersionVector<i64>,
+    ) -> Result<bool> {
+        if self.db_access.get_local_data_store()?.is_transfer_store {
+            for data_store in self.db_access.get_data_stores()? {
+                if data_store.is_this_store {
+                    continue;
+                }
+
+                // FIXME: pull this out of the 'inner loop' for better performance.
+                //        (Cache the inclusion rules, as they require parsing each time)
+                let mut store_inclusion_rules = InclusionRules::new(&data_store);
+                store_inclusion_rules.load_from_db(&self.db_access)?;
+                if store_inclusion_rules.is_included(&item_path) {
+                    let store_sync_time =
+                        &self.db_access.find_sync_time(&data_store, &item_path)?;
+                    if !(item_mod_time <= store_sync_time) {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        } else {
+            let is_included = self.local_inclusion_rules.is_included(&item_path);
+            Ok(!is_included)
         }
     }
 
@@ -663,10 +823,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         // We want to ignore the folder, but still add its metadata to the db.
-        if !self
-            .local_inclusion_rules
-            .is_included(&localized_path.to_lower_case())
-        {
+        if self.should_ignore_item(&localized_path.to_lower_case(), &sync_content.mod_time)? {
             let target_item = metadata_db::DBItem {
                 path: localized_path.clone(),
                 sync_time: sync_time,
@@ -691,7 +848,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         // In case nothing was there before, we create the folder but DO NOT
         // add any notices on mod's/syc's to it (will be done AFTER the sync).
         if !local_item.is_folder() {
-            self.fs_access.create_dir(&remote_path)?;
+            if !remote_path.is_root() {
+                self.fs_access.create_dir(&remote_path)?;
+            }
             self.fs_access.set_metadata(
                 &remote_path,
                 FileTime::from_unix_time(
@@ -847,10 +1006,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         }
 
         // We want to ignore the file, but still add its metadata to the db.
-        if !self
-            .local_inclusion_rules
-            .is_included(&localized_path.to_lower_case())
-        {
+        if self.should_ignore_item(&localized_path.to_lower_case(), &sync_content.last_mod_time)? {
             let target_item = metadata_db::DBItem {
                 path: localized_path.clone(),
                 sync_time: sync_time,
@@ -881,7 +1037,9 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         match &local_item.content {
             metadata_db::ItemType::FILE { .. } => self.fs_access.delete_file(&localized_path)?,
             metadata_db::ItemType::FOLDER { .. } => {
-                self.fs_access.delete_directory(&localized_path)?
+                if !localized_path.is_root() {
+                    self.fs_access.delete_directory(&localized_path)?
+                }
             }
             metadata_db::ItemType::DELETION { .. } => (), // Nothing to do
             metadata_db::ItemType::IGNORED { .. } => (),  // Nothing to do
@@ -957,7 +1115,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
                 // Nothing to do on disk, pure metadata operation.
             } else if local_item.is_file() {
                 self.fs_access.delete_file(&localized_path)?;
-            } else {
+            } else if !localized_path.is_root() {
                 self.fs_access.delete_directory(&localized_path)?;
             }
 
@@ -1064,7 +1222,7 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
     /// any synchronization operations on it.
     fn does_disk_item_match_db_item(&self, db_item: &DBItem, check_folder: bool) -> Result<bool> {
         // Root directory is always fine.
-        if db_item.path.path_component_number() <= 1 {
+        if db_item.path.is_root() {
             return Ok(true);
         }
         // We ignore the item, the disk can contain anything.

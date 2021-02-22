@@ -12,6 +12,8 @@ pub struct DataStore {
     pub location_note: String,
 
     pub is_this_store: bool,
+    pub is_transfer_store: bool,
+
     pub time: i64,
 }
 
@@ -27,5 +29,7 @@ pub struct InsertFull<'a> {
     pub location_note: &'a str,
 
     pub is_this_store: bool,
+    pub is_transfer_store: bool,
+
     pub time: i64,
 }

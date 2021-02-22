@@ -18,6 +18,8 @@ table! {
         location_note -> Text,
 
         is_this_store -> Bool,
+        is_transfer_store -> Bool,
+
         time -> BigInt,
     }
 }

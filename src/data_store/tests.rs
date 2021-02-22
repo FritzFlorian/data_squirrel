@@ -69,7 +69,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 7);
+    assert_eq!(data_store_1.local_time().unwrap(), 8);
 
     // Detect new and changed files
     in_memory_fs.create_file("file-3").unwrap();
@@ -87,7 +87,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 9);
+    assert_eq!(data_store_1.local_time().unwrap(), 10);
 
     // Detect deleted files and directories
     in_memory_fs.remove_file("file-1").unwrap();
@@ -105,7 +105,7 @@ fn scan_data_store_directory() {
             deleted_items: 2,
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 11);
+    assert_eq!(data_store_1.local_time().unwrap(), 12);
 
     // Re-add some
     in_memory_fs.create_file("file-1").unwrap();
@@ -121,7 +121,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 14);
+    assert_eq!(data_store_1.local_time().unwrap(), 15);
 
     // Changes in capitalization should be recognized as metadata changes
     in_memory_fs.rename("file-1", "FILE-1").unwrap();
@@ -138,7 +138,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 17);
+    assert_eq!(data_store_1.local_time().unwrap(), 18);
     let changes = data_store_1.perform_full_scan().unwrap();
     assert_eq!(
         changes,
@@ -149,7 +149,7 @@ fn scan_data_store_directory() {
             deleted_items: 0
         }
     );
-    assert_eq!(data_store_1.local_time().unwrap(), 17);
+    assert_eq!(data_store_1.local_time().unwrap(), 18);
 }
 
 #[test]
@@ -746,6 +746,122 @@ fn multi_target_sync_with_ignores() {
 }
 
 #[test]
+fn multi_target_sync_with_transfer_store() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+    let (fs_3, data_store_3) = create_in_memory_store();
+    let (fs_transfer, transfer_store) = create_in_memory_store();
+    transfer_store.mark_as_transfer_store().unwrap();
+
+    // Initial Data Set
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("sub-1/file-1").unwrap();
+    fs_2.create_dir("sub-2", false).unwrap();
+    fs_2.create_file("sub-2/file-2").unwrap();
+
+    // Index all
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    data_store_3.perform_full_scan().unwrap();
+
+    // Introduce our transfer store to store 1 and 3.
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_1)
+        .unwrap();
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_3)
+        .unwrap();
+
+    // Now the store should be aware of carrying data from store 1 to 3 and back.
+    // Thus, it should accept 'sub-1/file-1' to carry it to store 3.
+    transfer_store
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_transfer, "", vec!["sub-1"]);
+    dir_should_contain(&fs_transfer, "sub-1", vec!["file-1"]);
+
+    // Syncing out to store 3 should work just fine.
+    data_store_3
+        .sync_from_other_store_panic_conflicts(&transfer_store, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_3, "", vec!["sub-1"]);
+    dir_should_contain(&fs_3, "sub-1", vec!["file-1"]);
+
+    // When getting the knowledge of the sync status of data_store_3 the transfer should notice
+    // that there is no longer a need to hold 'sub-1/file-1'.
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_3)
+        .unwrap();
+    transfer_store.clean_transfer_store().unwrap();
+    dir_should_not_contain(&fs_transfer, "", vec!["sub-1"]);
+
+    // Now lets get to something interesting. We learn about data store 2, which also needs
+    // 'sub-1/file-1'. Thus, we should re-carry the items when syncing to a store that has them.
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_2)
+        .unwrap();
+    transfer_store
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_transfer, "", vec!["sub-1"]);
+    dir_should_contain(&fs_transfer, "sub-1", vec!["file-1"]);
+
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&transfer_store, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_2, "", vec!["sub-1", "sub-2"]);
+    dir_should_contain(&fs_2, "sub-1", vec!["file-1"]);
+    dir_should_contain(&fs_2, "sub-2", vec!["file-2"]);
+
+    // Lets sync the changes from store 2 to our transferring store to carry it to store 1 and 3.
+    // (The transfer store has not jet learned about the new sync status of store 2, thus it also
+    //  still holds its data).
+    transfer_store
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_transfer, "", vec!["sub-1", "sub-2"]);
+    dir_should_contain(&fs_transfer, "sub-1", vec!["file-1"]);
+    dir_should_contain(&fs_transfer, "sub-2", vec!["file-2"]);
+
+    // Get the data to store 3.
+    data_store_3
+        .sync_from_other_store_panic_conflicts(&transfer_store, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_3, "", vec!["sub-1", "sub-2"]);
+    dir_should_contain(&fs_3, "sub-1", vec!["file-1"]);
+    dir_should_contain(&fs_3, "sub-2", vec!["file-2"]);
+
+    // When getting the knowledge of the sync status of data_store_2 the transfer should notice
+    // that there is no longer a need to hold 'sub-1/file-1'. It should still hold data from store 2.
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_2)
+        .unwrap();
+    transfer_store.clean_transfer_store().unwrap();
+    dir_should_not_contain(&fs_transfer, "", vec!["sub-1"]);
+    dir_should_contain(&fs_transfer, "", vec!["sub-2"]);
+    dir_should_contain(&fs_transfer, "sub-2", vec!["file-2"]);
+
+    // We should still be able to get the data to store 1.
+    data_store_1
+        .sync_from_other_store_panic_conflicts(&transfer_store, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_1, "", vec!["sub-1", "sub-2"]);
+    dir_should_contain(&fs_1, "sub-1", vec!["file-1"]);
+    dir_should_contain(&fs_1, "sub-2", vec!["file-2"]);
+
+    // Now learn about store 3's and store 1's sync status. This should finally drop all data
+    // from our transferring store.
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_1)
+        .unwrap();
+    transfer_store
+        .get_significant_sync_times_from_other(&data_store_3)
+        .unwrap();
+    transfer_store.clean_transfer_store().unwrap();
+    dir_should_not_contain(&fs_transfer, "", vec!["sub-1", "sub-2"]);
+}
+
+#[test]
 fn detect_ignore_status_changes() {
     let (fs_1, mut data_store_1) = create_in_memory_store();
 
@@ -796,6 +912,54 @@ fn detect_ignore_status_changes() {
             deleted_items: 0
         }
     );
+}
+
+#[test]
+fn multi_target_transfer_significant_times() {
+    let (fs_1, data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+    let (_fs_3, data_store_3) = create_in_memory_store();
+
+    // Initial Data Set
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_file("sub-1/file-1").unwrap();
+    fs_2.create_dir("sub-2", false).unwrap();
+    fs_2.create_file("sub-2/file-1").unwrap();
+
+    // Index all
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+    data_store_3.perform_full_scan().unwrap();
+
+    // Sync from 1 to 3 partially only sub-1.
+    // This should leave this should leave the store with 'partial' sync times of 3.
+    data_store_3
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path("sub-1"))
+        .unwrap();
+
+    let significant_items = data_store_1
+        .get_significant_sync_times_from_other(&data_store_3)
+        .unwrap();
+    assert_eq!(significant_items, 2); // The root '/' and 'sub-1' should hold times.
+
+    // Should not re-transfer.
+    let significant_items = data_store_1
+        .get_significant_sync_times_from_other(&data_store_3)
+        .unwrap();
+    assert_eq!(significant_items, 0);
+
+    // Now pass the knowledge from store 1 to 2.
+    let significant_items = data_store_2
+        .get_significant_sync_times_from_other(&data_store_1)
+        .unwrap();
+    assert_eq!(significant_items, 3); // The root '/' of store_1 + root '/' and 'sub-1' of store_3.
+
+    // Now pass the knowledge back from 2 to 3.
+    let significant_items = data_store_3
+        .get_significant_sync_times_from_other(&data_store_2)
+        .unwrap();
+    assert_eq!(significant_items, 2); // The root '/' of store_1  and root '/' of store_2.
+                                      // All information on store 3 is already in store 3.
 }
 
 fn create_synced_base_state() -> (

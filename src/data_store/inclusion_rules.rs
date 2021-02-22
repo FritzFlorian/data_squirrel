@@ -16,6 +16,10 @@ impl InclusionRules {
         }
     }
 
+    pub fn change_data_store(&mut self, data_store: DataStore) {
+        self.data_store = data_store;
+    }
+
     pub fn load_from_db(&mut self, db_access: &MetadataDB) -> Result<()> {
         self.rules = db_access.get_inclusion_rules(&self.data_store)?;
         Ok(())

@@ -241,7 +241,7 @@ impl MetadataDB {
         use diesel::dsl::*;
 
         let result = self.run_transaction(|| {
-            // Check DB consistency (for only ONE local data store)
+            // Check DB consistency (for only ONE local data store and ONE transfer store)
             if data_store.is_this_store {
                 let this_store_already_exists = select(exists(
                     data_stores::table.filter(data_stores::is_this_store.eq(true)),
@@ -272,6 +272,42 @@ impl MetadataDB {
         })?;
 
         Ok(result)
+    }
+
+    /// Updates the given data store information.
+    pub fn update_data_store(
+        &self,
+        unique_name: &str,
+        new_time: i64,
+        new_human_name: &str,
+        new_location_note: &str,
+    ) -> Result<()> {
+        diesel::update(data_stores::table.filter(data_stores::unique_name.eq(unique_name)))
+            .set((
+                data_stores::time.eq(new_time),
+                data_stores::human_name.eq(new_human_name),
+                data_stores::location_note.eq(new_location_note),
+            ))
+            .execute(&self.conn)?;
+
+        Ok(())
+    }
+
+    /// Marks the local data store to be a transfer store, i.e. it does not index its own
+    /// items but its purpose is to propagate changes to other stores.
+    pub fn mark_as_transfer_store(&self) -> Result<()> {
+        let local_store = self.get_local_data_store()?;
+        *self.local_datastore.borrow_mut() = None;
+        diesel::update(data_stores::table.find(local_store.id))
+            .set(data_stores::is_transfer_store.eq(true))
+            .execute(&self.conn)?;
+
+        Ok(())
+    }
+
+    /// Queries if the local store is a transfer store, i.e. it carries data to other stores.
+    pub fn is_transfer_store(&self) -> Result<bool> {
+        Ok(self.get_local_data_store()?.is_transfer_store)
     }
 
     /// Returns the local data store of the open MetadataDB.
@@ -310,7 +346,8 @@ impl MetadataDB {
     }
 
     /// Queries a data item from the DB and returns it.
-    /// Data items must always exist, as there is at least a deletion notice for everything.
+    /// Data items must always exist, as there is at least a deletion/ignore notice for everything.
+    // FIXME: Return ignore entry or deletion notice based on last seen item type.
     pub fn get_local_data_item(
         &self,
         path: &RelativePath,
@@ -539,6 +576,8 @@ impl MetadataDB {
     /// if it was synced to another store, the other store will still keep it.
     ///
     /// Does not affect any modification times.
+    // FIXME: This should really NOT BE a LOCAL DATA STORE EVENT, as it does not
+    //        add modification times!
     pub fn ignore_local_data_item(&self, path: &RelativePath) -> Result<()> {
         self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
@@ -554,6 +593,8 @@ impl MetadataDB {
                 diesel::update(items::table.filter(items::id.eq(existing_item.item.id)))
                     .set(items::file_type.eq(FileType::IGNORED))
                     .execute(&self.conn)?;
+                // FIXME: Only remove the FS metadata component and keep the mod metadata part.
+                //        Maybe also experiment with DB constraints that check for these invariants.
                 // In contrast to deleted items we keep its metadata. We can still sync
                 // 'only the metadata' when fetching changes to an remote. This way, the mod/sync
                 // timestamps are consistent in respect ot sync=min(children) and mod=max(children).
@@ -575,6 +616,8 @@ impl MetadataDB {
     /// This means, that for all items we will have deletion notices at time 0.
     ///
     /// Does not affect any modification times.
+    // FIXME: This should really NOT BE a LOCAL DATA STORE EVENT, as it does not
+    //        add modification times!
     pub fn reset_local_data_item(&self, path: &RelativePath) -> Result<()> {
         self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
@@ -637,6 +680,12 @@ impl MetadataDB {
     /// MUST only do sensible sync operations and will throw ViolatesDBConsistency Errors
     /// otherwise. For example, it never makes sense to update the full modification vector of an
     /// item, as this vector MUST be explicitly be generated from its child items.
+    // FIXME: This should really NOT BE a LOCAL DATA STORE EVENT, as it does not
+    //        add modification times! Then we could also sync other stores.
+    // FIXME: The function should be simplified (it does a lot right now).
+    //        Maybe see if we can split up different usages of this during a sync operation.
+    // FIXME: Add a flag to data stores if they are NOT SYNCED, SIGNIFICANTLY SYNCED or FULLY
+    //        SYNCED. Only fully synced stores should run through operations like this.
     pub fn sync_local_data_item(&self, path: &RelativePath, target_item: &DBItem) -> Result<()> {
         self.run_transaction(|| {
             let local_data_store = self.get_local_data_store()?;
@@ -664,15 +713,7 @@ impl MetadataDB {
 
                 // Remove un-needed metadata entries for deleted items.
                 if target_item.is_deletion() {
-                    diesel::delete(
-                        mod_metadatas::table.filter(mod_metadatas::id.eq(existing_item.item.id)),
-                    )
-                    .execute(&self.conn)?;
-                    diesel::delete(
-                        file_system_metadatas::table
-                            .filter(file_system_metadatas::id.eq(existing_item.item.id)),
-                    )
-                    .execute(&self.conn)?;
+                    self.delete_item_metadata(existing_item)?;
                 }
 
                 // Everything is ready to simply be 'synced up' with the target item.
@@ -810,6 +851,8 @@ impl MetadataDB {
                 )?;
             }
 
+            // This is not strictly required, however, it notifies that our DB content changed.
+            self.increase_local_time()?;
             self.notify_change_for_optimization()?;
             Ok(())
         })
@@ -915,7 +958,6 @@ impl MetadataDB {
             let parent_dir_item = path_items.last().unwrap();
             let existing_item = Some(path_items.last().unwrap());
 
-            Self::validate_items_as_parent_dir(&parent_dir_item)?;
             Ok((&parent_dir_item, existing_item))
         } else if path_items.len() == target_item_depth {
             let existing_item = Some(path_items.last().unwrap());
@@ -1188,8 +1230,9 @@ impl MetadataDB {
     /// A sync time is significant, if it has entries stored in the DB.
     /// After running `clean_up_local_sync_times` this function should only return
     /// DBItems that have changes in their sync time compared to their parent.
-    pub fn find_local_significant_sync_times(
+    pub fn find_significant_sync_times(
         &self,
+        data_store: &DataStore,
     ) -> Result<Vec<(RelativePath, VersionVector<i64>)>> {
         #[derive(QueryableByName)]
         #[table_name = "path_components"]
@@ -1197,13 +1240,19 @@ impl MetadataDB {
             full_path: String,
         }
         self.conn.transaction(|| {
-            let significant_paths = diesel::sql_query("SELECT path_components.full_path FROM items, path_components WHERE ((SELECT COUNT(*) FROM sync_times WHERE sync_times.item_id = items.id) > 0 OR full_path = '/') AND path_components.id = items.path_component_id").load::<PathResult>(&self.conn)?;
+            let significant_paths = diesel::sql_query("SELECT path_components.full_path FROM items, path_components WHERE items.data_store_id = ? AND ((SELECT COUNT(*) FROM sync_times WHERE sync_times.item_id = items.id) > 0 OR full_path = '/') AND path_components.id = items.path_component_id").bind::<diesel::sql_types::BigInt, _>(data_store.id).load::<PathResult>(&self.conn)?;
             significant_paths
                 .into_iter()
                 .map(|item| RelativePath::from_path(&item.full_path[1..]))
                 .map(|path| {
-                    let db_item =  self.get_local_data_item(&path, true)?;
-                    Ok((db_item.path, db_item.sync_time))
+                    let mut path_items =
+                        self.load_data_items_on_path(&data_store, &path, true)?;
+                    if path_items.len() == path.path_component_number() {
+                        let target_item = path_items.pop().unwrap();
+                        Ok((path, target_item.sync_time.unwrap()))
+                    } else {
+                        panic!("must not reach this, as we only select paths with matching items");
+                    }
                 })
                 .collect()
         })
@@ -1216,7 +1265,7 @@ impl MetadataDB {
     /// Essentially, this allows to transfer the knowledge of the synchronization status
     /// of other data stores into the local data store. This is the key piece of information
     /// needed to implement 'carrying' of data on devices like a laptop.
-    pub fn enter_significant_sync_times_for(
+    pub fn enter_significant_sync_times(
         &self,
         data_store: &DataStore,
         entries: Vec<(RelativePath, VersionVector<i64>)>,
@@ -1363,15 +1412,16 @@ impl MetadataDB {
             .filter(items::data_store_id.eq(data_store.id))
             .first::<Item>(&self.conn)?;
 
+        let new_time = self.increase_local_time()?;
         diesel::insert_into(mod_metadatas::table)
             .values(mod_metadata::InsertFull {
                 id: root_item.id,
 
                 creator_store_id: data_store.id,
-                creator_store_time: 0,
+                creator_store_time: new_time,
 
                 last_mod_store_id: data_store.id,
-                last_mod_store_time: 0,
+                last_mod_store_time: new_time,
             })
             .execute(&self.conn)?;
         diesel::insert_into(file_system_metadatas::table)
@@ -1433,6 +1483,14 @@ impl MetadataDB {
         sql_query("PRAGMA cache_size = -512000").execute(&self.conn)?;
         sql_query("PRAGMA mmap_size = 536870912").execute(&self.conn)?;
 
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn dump_db(&self, target: &str) -> Result<()> {
+        sql_query("VACUUM INTO ?")
+            .bind::<diesel::sql_types::Text, _>(target)
+            .execute(&self.conn)?;
         Ok(())
     }
 }

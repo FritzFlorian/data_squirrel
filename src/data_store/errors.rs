@@ -16,6 +16,8 @@ pub enum DataStoreError {
     SyncError {
         message: &'static str,
     },
+    MustNotScanTransferStores,
+    OnlyCleanStoresCanBecomeTransfer,
 }
 pub type Result<T> = std::result::Result<T, DataStoreError>;
 

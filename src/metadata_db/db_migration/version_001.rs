@@ -49,6 +49,8 @@ fn create_table_data_stores(conn: &SqliteConnection) -> Result<()> {
                 location_note       TEXT NOT NULL DEFAULT '',
 
                 is_this_store       INTEGER NOT NULL,
+                is_transfer_store   INTEGER NOT NULL,
+
                 time                INTEGER NOT NULL,
 
                 UNIQUE(unique_name),
@@ -70,7 +72,7 @@ fn create_table_inclusion_rules(conn: &SqliteConnection) -> Result<()> {
                 rule_glob           TEXT NOT NULL,
                 include             INTEGER NOT NULL,
 
-                UNIQUE(rule_glob),
+                UNIQUE(data_store_id, rule_glob),
                 FOREIGN KEY(data_store_id)    REFERENCES data_stores(id)
              )",
     )

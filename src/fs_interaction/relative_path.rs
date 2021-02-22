@@ -28,6 +28,11 @@ impl RelativePath {
                     .to_str()
                     .expect("TODO: we currently only support UTF-8 compatible file names!"),
             ));
+            // We got an issue if we enter the path '/', as the normal Path parser sees
+            // this as part of the actual path (as a component) and not as a begining slash.
+            if path_components.last().unwrap() == "/" {
+                path_components.pop();
+            }
         }
 
         RelativePath { path_components }
@@ -53,6 +58,10 @@ impl RelativePath {
 
     pub fn path_component_number(&self) -> usize {
         self.path_components.len()
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.path_component_number() == 1
     }
 
     pub fn join(&self, component: String) -> RelativePath {
