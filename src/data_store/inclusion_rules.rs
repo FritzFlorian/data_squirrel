@@ -1,6 +1,7 @@
 use super::Result;
 use fs_interaction::relative_path::RelativePath;
 use metadata_db::{DBInclusionRule, DataStore, MetadataDB};
+use std::slice::Iter;
 
 #[derive(Debug, Clone)]
 pub struct InclusionRules {
@@ -18,6 +19,10 @@ impl InclusionRules {
 
     pub fn change_data_store(&mut self, data_store: DataStore) {
         self.data_store = data_store;
+    }
+
+    pub fn iter(&self) -> Iter<DBInclusionRule> {
+        self.rules.iter()
     }
 
     pub fn load_from_db(&mut self, db_access: &MetadataDB) -> Result<()> {
