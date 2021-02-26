@@ -83,8 +83,8 @@ fn create_data_store(local_path: &str, cmd_cli: &ArgMatches) {
         }
         Err(core::data_store::DataStoreError::FSInteractionError {
             source: core::fs_interaction::FSInteractionError::MetadataDirAlreadyExists,
-        }) => eprintln!("A data store already exists on the given path!"),
-        Err(err) => eprintln!("{:?}", err),
+        }) => panic!("A data store already exists on the given path!"),
+        Err(err) => panic!("{:?}", err),
     }
 }
 

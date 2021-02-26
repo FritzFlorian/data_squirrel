@@ -33,6 +33,7 @@ mod tests {
         let content: Vec<_> = std::fs::read_dir(dir.path().join(path))
             .unwrap()
             .into_iter()
+            .map(|item| item.unwrap().file_name().to_str().unwrap().to_string())
             .collect();
 
         assert_eq!(
@@ -41,23 +42,21 @@ mod tests {
             "Directory must contain the expected number of items!"
         );
         for expected_item in expected_items {
-            assert!(content
-                .iter()
-                .any(|item| item.as_ref().unwrap().file_name().to_str().unwrap() == expected_item))
+            assert!(content.iter().any(|item| item == expected_item))
         }
     }
 
     fn cmd_success(dir: &TempDir, cmd: &str, args: Vec<&str>) {
-        let mut main_cmd = main_cmd();
-        main_cmd
+        let assert = main_cmd()
             .arg(dir.path())
             .arg(cmd)
             .args(args)
             .assert()
             .success();
+        println!("{:?}", assert.get_output());
     }
     fn cmd_should_print(dir: &TempDir, cmd: &str, args: Vec<&str>, expected: &str) {
-        main_cmd()
+        let assert = main_cmd()
             .arg(dir.path())
             .arg(cmd)
             .args(args)
@@ -65,6 +64,7 @@ mod tests {
             .stdout(predicate::function(|output: &str| {
                 output.contains(&expected)
             }));
+        println!("{:?}", assert.get_output());
     }
 
     #[test]
@@ -132,12 +132,12 @@ mod tests {
         cmd_success(&dir_1, "scan", vec![]);
         cmd_success(&dir_2, "scan", vec![]);
 
-        cmd_success(
+        cmd_should_print(
             &dir_1,
             "rules",
-            vec!["--ignore-rule=**/file-2-1", "--ignore-rule=**/file-2-2"],
+            vec!["--ignore-rule=**/file-1-1", "--ignore-rule=**/file-2-1"],
+            "Newly ignored items:\nfile-1-1",
         );
-        cmd_success(&dir_1, "rules", vec!["--print"]);
 
         cmd_success(&dir_1, "sync-from", vec![dir_2.path().to_str().unwrap()]);
         cmd_success(&dir_2, "sync-from", vec![dir_1.path().to_str().unwrap()]);
@@ -145,18 +145,12 @@ mod tests {
         dir_content(
             &dir_1,
             "",
-            vec![".__data_squirrel__", "file-1-1", "file-1-2"],
+            vec![".__data_squirrel__", "file-1-1", "file-1-2", "file-2-2"],
         );
         dir_content(
             &dir_2,
             "",
-            vec![
-                ".__data_squirrel__",
-                "file-2-1",
-                "file-2-2",
-                "file-1-1",
-                "file-1-2",
-            ],
+            vec![".__data_squirrel__", "file-2-1", "file-2-2", "file-1-2"],
         );
     }
 }

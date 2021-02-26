@@ -880,14 +880,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
         for remote_child_item in sync_content.child_items {
             visited_items.insert(remote_child_item.to_lowercase());
 
-            all_children_synced = all_children_synced
-                && self.sync_from_other_store_recursive(
-                    &from_other,
-                    &localized_path.join(remote_child_item),
-                    &local_mapper,
-                    &remote_mapper,
-                    sync_conflict,
-                )?;
+            let child_synced = self.sync_from_other_store_recursive(
+                &from_other,
+                &localized_path.join(remote_child_item),
+                &local_mapper,
+                &remote_mapper,
+                sync_conflict,
+            )?;
+            all_children_synced = all_children_synced && child_synced;
         }
         // ...and also into local items (these should simply get deleted,
         // but we can optimize this later on after the basic works).
@@ -896,14 +896,14 @@ impl<FS: virtual_fs::FS> DataStore<FS> {
             .get_local_child_items(&localized_path, true)?
         {
             if !visited_items.contains(&local_child.path.name().to_lowercase()) {
-                all_children_synced = all_children_synced
-                    && self.sync_from_other_store_recursive(
-                        &from_other,
-                        &local_child.path,
-                        &local_mapper,
-                        &remote_mapper,
-                        sync_conflict,
-                    )?;
+                let child_synced = self.sync_from_other_store_recursive(
+                    &from_other,
+                    &local_child.path,
+                    &local_mapper,
+                    &remote_mapper,
+                    sync_conflict,
+                )?;
+                all_children_synced = all_children_synced && child_synced;
             }
         }
 

@@ -154,20 +154,17 @@ fn scan_data_store_directory() {
 
 #[test]
 fn exclude_ignored_files_during_scan() {
-    let in_memory_fs = virtual_fs::InMemoryFS::new();
-    let mut data_store_1 =
-        DataStore::create_with_fs("", "XYZ", "XYZ", "local-data-store", in_memory_fs.clone())
-            .unwrap();
+    let (fs_1, mut data_store_1) = create_in_memory_store();
 
     // Initial data set
-    in_memory_fs.create_dir("sub-1", false).unwrap();
-    in_memory_fs.create_dir("sub-2", false).unwrap();
-    in_memory_fs.create_dir("sub-1/sub-3", false).unwrap();
+    fs_1.create_dir("sub-1", false).unwrap();
+    fs_1.create_dir("sub-2", false).unwrap();
+    fs_1.create_dir("sub-1/sub-3", false).unwrap();
 
-    in_memory_fs.create_file("file-1").unwrap();
-    in_memory_fs.create_file("file-2").unwrap();
-    in_memory_fs.create_file("sub-1/file-1").unwrap();
-    in_memory_fs.create_file("sub-1/sub-3/file-3").unwrap();
+    fs_1.create_file("file-1").unwrap();
+    fs_1.create_file("file-2").unwrap();
+    fs_1.create_file("sub-1/file-1").unwrap();
+    fs_1.create_file("sub-1/sub-3/file-3").unwrap();
 
     // Ignore just sub-3 for now.
     data_store_1
@@ -185,11 +182,10 @@ fn exclude_ignored_files_during_scan() {
     );
 
     // Detect we do not want to detect these changes, all should fall under the new ignore rules.
-    in_memory_fs
-        .test_increase_file_mod_time("sub-1/sub-3/file-3")
+    fs_1.test_increase_file_mod_time("sub-1/sub-3/file-3")
         .unwrap();
-    in_memory_fs.create_file("sub-1/file-2").unwrap();
-    in_memory_fs.test_increase_file_mod_time("file-2").unwrap();
+    fs_1.create_file("sub-1/file-2").unwrap();
+    fs_1.test_increase_file_mod_time("file-2").unwrap();
 
     // NOTE: we DO EXPECT to remove existing indexed files. These should become ignored items.
     let (_, ignored_items) = data_store_1
@@ -226,6 +222,42 @@ fn exclude_ignored_files_during_scan() {
             deleted_items: 0,
         }
     );
+}
+
+/// Regression:
+/// The sync algorithm used 'all_children_synced = all_children_synced && recursive_call()'.
+/// The short circuiting of the && operator did not perform any further calls once the variable
+/// was true (file-1 causes it to become true, thus the algorithm did not synchronize file-2).
+///
+/// ...very, very dump error for trying to be 'smart' by writing it short.
+#[test]
+fn regression_partial_sync_with_newly_ignored_item() {
+    let (fs_1, mut data_store_1) = create_in_memory_store();
+    let (fs_2, data_store_2) = create_in_memory_store();
+
+    fs_1.create_file("file-1").unwrap();
+    fs_1.create_file("file-2").unwrap();
+    fs_2.create_file("file-3").unwrap();
+    data_store_1.perform_full_scan().unwrap();
+    data_store_2.perform_full_scan().unwrap();
+
+    let (_, ignored_items) = data_store_1
+        .add_ignore_rule(glob::Pattern::new("**/file-1").unwrap())
+        .unwrap();
+    assert_eq!(ignored_items.len(), 1);
+    assert_eq!(
+        ignored_items.first().unwrap().path,
+        RelativePath::from_path("file-1")
+    );
+
+    data_store_1
+        .sync_from_other_store_panic_conflicts(&data_store_2, &RelativePath::from_path(""))
+        .unwrap();
+    data_store_2
+        .sync_from_other_store_panic_conflicts(&data_store_1, &RelativePath::from_path(""))
+        .unwrap();
+    dir_should_contain(&fs_2, "", vec!["file-2", "file-3"]);
+    dir_should_not_contain(&fs_2, "", vec!["file-1"]);
 }
 
 fn dir_should_contain<FS: virtual_fs::FS>(fs: &FS, path: &str, expected_content: Vec<&str>) {
